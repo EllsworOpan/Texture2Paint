@@ -1377,6 +1377,7 @@
     import { decompressGlb } from './src/decompress.js';
     import { Viewer } from './src/viewer.js';
     import {
+      canonicalizeModel,
       applyUvFlip,
       applyLiveColorQuantization,
       exportMultiColor3MF,
@@ -1700,6 +1701,7 @@
 
       try {
         const loaded = await loadObjectFromFile(primary, resources.manager, files);
+        canonicalizeModel(loaded.object);
         const { triangles } = viewer.loadObject(loaded.object);
         revokeUrls(lastResourceUrls);
         lastResourceUrls = resources.urls;
