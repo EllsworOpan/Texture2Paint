@@ -492,13 +492,31 @@ export async function exportMultiColor3MF(
   rootObject.updateWorldMatrix(true, true);
 
   let targetMesh = null;
+  let mat = null;
+
+  // Search for the mesh and material that actually contains the texture map
   rootObject.traverse(child => {
-    if (child.isMesh && child.geometry && !targetMesh) targetMesh = child;
+    if (child.isMesh && child.geometry && !targetMesh) {
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      const mWithMap = mats.find(m => m && (m._originalMap?.image || m.map?.image));
+      if (mWithMap) {
+        targetMesh = child;
+        mat = mWithMap;
+      }
+    }
   });
 
-  if (!targetMesh) throw new Error('No mesh found to export');
+  // Fallback if no textured material was found
+  if (!targetMesh) {
+    rootObject.traverse(child => {
+      if (child.isMesh && child.geometry && !targetMesh) {
+        targetMesh = child;
+        mat = Array.isArray(child.material) ? child.material[0] : child.material;
+      }
+    });
+  }
 
-  const mat = Array.isArray(targetMesh.material) ? targetMesh.material[0] : targetMesh.material;
+  if (!targetMesh) throw new Error('No mesh found to export');
   const image = mat?._originalMap?.image || mat?.map?.image;
   if (!image) throw new Error('Mesh must have a texture map');
 
@@ -744,9 +762,18 @@ export function exportProcessedGlb(model, {
       if (child.isMesh) {
         child.geometry = child.geometry.clone();
         if (child.material) {
-          child.material = child.material.clone();
-          if (child.material.map) {
-            child.material.map = child.material.map.clone();
+          if (Array.isArray(child.material)) {
+            // Handle multi-material arrays from game rips
+            child.material = child.material.map(mat => {
+              const m = mat.clone();
+              if (m.map) m.map = m.map.clone();
+              return m;
+            });
+          } else {
+            child.material = child.material.clone();
+            if (child.material.map) {
+              child.material.map = child.material.map.clone();
+            }
           }
         }
       }
@@ -786,3 +813,857 @@ export function getModelTextures(rootObject) {
   return Array.from(textures.values());
 }
 export function linkGlbOriginalTextures() { }
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * MESH REPAIR & SEALING ENGINE
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+/**
+ * Computes 2D point-in-triangle test using barycentric coordinates.
+ */
+function pointInTriangle2D(px, py, ax, ay, bx, by, cx, cy) {
+  const v0x = cx - ax, v0y = cy - ay;
+  const v1x = bx - ax, v1y = by - ay;
+  const v2x = px - ax, v2y = py - ay;
+
+  const dot00 = v0x * v0x + v0y * v0y;
+  const dot01 = v0x * v1x + v0y * v1y;
+  const dot02 = v0x * v2x + v0y * v2y;
+  const dot11 = v1x * v1x + v1y * v1y;
+  const dot12 = v1x * v2x + v1y * v2y;
+
+  const denom = dot00 * dot11 - dot01 * dot01;
+  if (Math.abs(denom) < 1e-14) return false;
+  const invDenom = 1.0 / denom;
+  const u = (dot11 * dot02 - dot01 * dot12) * invDenom;
+  const v = (dot00 * dot12 - dot01 * dot02) * invDenom;
+
+  return u > 1e-5 && v > 1e-5 && (u + v) < 1.0 - 1e-5;
+}
+
+/**
+ * Triangulates a closed 3D boundary loop to seal a hole.
+ * Uses Newell normal projection & 2D Ear Clipping, with Centroid Fan fallback.
+ */
+function triangulateBoundaryLoop(loopVertexIndices, weldedPositions, weldedUvs) {
+  const len = loopVertexIndices.length;
+  if (len < 3) return [];
+
+  // Triangle
+  if (len === 3) {
+    return [[loopVertexIndices[0], loopVertexIndices[1], loopVertexIndices[2]]];
+  }
+
+  // Quad: choose shorter diagonal for better triangle quality
+  if (len === 4) {
+    const i0 = loopVertexIndices[0];
+    const i1 = loopVertexIndices[1];
+    const i2 = loopVertexIndices[2];
+    const i3 = loopVertexIndices[3];
+    const p0 = weldedPositions[i0];
+    const p1 = weldedPositions[i1];
+    const p2 = weldedPositions[i2];
+    const p3 = weldedPositions[i3];
+
+    const diag02 = (p0[0] - p2[0]) ** 2 + (p0[1] - p2[1]) ** 2 + (p0[2] - p2[2]) ** 2;
+    const diag13 = (p1[0] - p3[0]) ** 2 + (p1[1] - p3[1]) ** 2 + (p1[2] - p3[2]) ** 2;
+
+    if (diag02 <= diag13) {
+      return [[i0, i1, i2], [i0, i2, i3]];
+    } else {
+      return [[i1, i2, i3], [i1, i3, i0]];
+    }
+  }
+
+  // General N-gon: Ear clipping with 2D projection
+  // Compute Newell's best-fit normal
+  let nx = 0, ny = 0, nz = 0;
+  for (let i = 0; i < len; i++) {
+    const p1 = weldedPositions[loopVertexIndices[i]];
+    const p2 = weldedPositions[loopVertexIndices[(i + 1) % len]];
+    nx += (p1[1] - p2[1]) * (p1[2] + p2[2]);
+    ny += (p1[2] - p2[2]) * (p1[0] + p2[0]);
+    nz += (p1[0] - p2[0]) * (p1[1] + p2[1]);
+  }
+
+  const normLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
+  const triangles = [];
+
+  if (normLen > 1e-10) {
+    const ax = Math.abs(nx);
+    const ay = Math.abs(ny);
+    const az = Math.abs(nz);
+
+    // Project to 2D by dropping coordinate of largest normal component
+    const pts2D = [];
+    for (let i = 0; i < len; i++) {
+      const p = weldedPositions[loopVertexIndices[i]];
+      if (ax >= ay && ax >= az) {
+        pts2D.push({ x: p[1], y: p[2], id: loopVertexIndices[i] });
+      } else if (ay >= ax && ay >= az) {
+        pts2D.push({ x: p[2], y: p[0], id: loopVertexIndices[i] });
+      } else {
+        pts2D.push({ x: p[0], y: p[1], id: loopVertexIndices[i] });
+      }
+    }
+
+    // Signed area in 2D
+    let area2 = 0;
+    for (let i = 0; i < len; i++) {
+      const p1 = pts2D[i];
+      const p2 = pts2D[(i + 1) % len];
+      area2 += (p1.x * p2.y - p2.x * p1.y);
+    }
+    const signArea = area2 >= 0 ? 1 : -1;
+
+    // Polygon vertex list for clipping
+    const poly = pts2D.map((pt, idx) => ({ ...pt, origIdx: idx }));
+    let iterations = 0;
+    const maxIterations = len * len;
+
+    while (poly.length > 3 && iterations++ < maxIterations) {
+      let earFound = false;
+      const n = poly.length;
+
+      for (let i = 0; i < n; i++) {
+        const prev = poly[(i - 1 + n) % n];
+        const curr = poly[i];
+        const next = poly[(i + 1) % n];
+
+        // Check if vertex is convex
+        const cp = (curr.x - prev.x) * (next.y - prev.y) - (curr.y - prev.y) * (next.x - prev.x);
+        if (cp * signArea <= 1e-10) continue;
+
+        // Check if any other polygon vertex is inside this triangle
+        let hasPointInside = false;
+        for (let j = 0; j < n; j++) {
+          if (j === (i - 1 + n) % n || j === i || j === (i + 1) % n) continue;
+          const pt = poly[j];
+          if (pointInTriangle2D(pt.x, pt.y, prev.x, prev.y, curr.x, curr.y, next.x, next.y)) {
+            hasPointInside = true;
+            break;
+          }
+        }
+
+        if (!hasPointInside) {
+          // Ear clipped!
+          triangles.push([prev.id, curr.id, next.id]);
+          poly.splice(i, 1);
+          earFound = true;
+          break;
+        }
+      }
+
+      if (!earFound) {
+        // Ear clipping stalled due to non-simple/self-intersecting geometry: break to centroid fan
+        break;
+      }
+    }
+
+    if (poly.length === 3) {
+      triangles.push([poly[0].id, poly[1].id, poly[2].id]);
+      return triangles;
+    }
+  }
+
+  // Fallback: Centroid fan triangulation
+  let cx = 0, cy = 0, cz = 0;
+  let cu = 0, cv = 0;
+  let uvCount = 0;
+
+  for (let i = 0; i < len; i++) {
+    const p = weldedPositions[loopVertexIndices[i]];
+    cx += p[0]; cy += p[1]; cz += p[2];
+    if (weldedUvs && weldedUvs[loopVertexIndices[i]]) {
+      cu += weldedUvs[loopVertexIndices[i]][0];
+      cv += weldedUvs[loopVertexIndices[i]][1];
+      uvCount++;
+    }
+  }
+  cx /= len; cy /= len; cz /= len;
+
+  const centroidIdx = weldedPositions.length;
+  weldedPositions.push([cx, cy, cz]);
+  if (weldedUvs) {
+    weldedUvs.push(uvCount > 0 ? [cu / uvCount, cv / uvCount] : [0.5, 0.5]);
+  }
+
+  for (let i = 0; i < len; i++) {
+    triangles.push([loopVertexIndices[i], loopVertexIndices[(i + 1) % len], centroidIdx]);
+  }
+
+  return triangles;
+}
+
+/**
+ * Repairs, welds, and seals an individual THREE.BufferGeometry.
+ */
+export function repairBufferGeometry(geometry, options = {}) {
+  if (!geometry || !geometry.attributes.position) {
+    return { geometry, stats: null };
+  }
+
+  const posAttr = geometry.attributes.position;
+  const uvAttr = geometry.attributes.uv;
+  const indexAttr = geometry.index;
+  const numVertices = posAttr.count;
+
+  // Bounding box to compute auto-tolerance if needed
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < numVertices; i++) {
+    const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i);
+    if (x < minX) minX = x; if (y < minY) minY = y; if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x; if (y > maxY) maxY = y; if (z > maxZ) maxZ = z;
+  }
+  const maxDim = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1.0;
+
+  const tolerance = options.tolerance > 0 ? options.tolerance : (maxDim * 0.001);
+  const closeHoles = options.closeHoles !== false;
+  const maxHoleEdges = options.maxHoleEdges || 500;
+
+  // 1. SPATIAL HASHING / BUCKET CLUSTERING FOR VERTEX WELDING
+  const cellSize = Math.max(tolerance, 1e-6);
+  const invCell = 1.0 / cellSize;
+  const grid = new Map();
+  const weldedPositions = []; // [ [x, y, z], ... ]
+  const weldedUvs = [];       // [ [u, v], ... ]
+  const vertexToWelded = new Int32Array(numVertices);
+
+  for (let i = 0; i < numVertices; i++) {
+    const px = posAttr.getX(i);
+    const py = posAttr.getY(i);
+    const pz = posAttr.getZ(i);
+
+    const cx = Math.floor(px * invCell);
+    const cy = Math.floor(py * invCell);
+    const cz = Math.floor(pz * invCell);
+
+    let matchIdx = -1;
+    let minDistSq = tolerance * tolerance;
+
+    // Check 27 neighboring cells
+    neighborLoop:
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const key = `${cx + dx}_${cy + dy}_${cz + dz}`;
+          const bucket = grid.get(key);
+          if (bucket) {
+            for (let b = 0; b < bucket.length; b++) {
+              const wIdx = bucket[b];
+              const wp = weldedPositions[wIdx];
+              const dSq = (px - wp[0]) ** 2 + (py - wp[1]) ** 2 + (pz - wp[2]) ** 2;
+              if (dSq <= minDistSq) {
+                minDistSq = dSq;
+                matchIdx = wIdx;
+                break neighborLoop;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (matchIdx >= 0) {
+      vertexToWelded[i] = matchIdx;
+    } else {
+      const newIdx = weldedPositions.length;
+      weldedPositions.push([px, py, pz]);
+      if (uvAttr) {
+        weldedUvs.push([uvAttr.getX(i), uvAttr.getY(i)]);
+      }
+      vertexToWelded[i] = newIdx;
+
+      const key = `${cx}_${cy}_${cz}`;
+      let bucket = grid.get(key);
+      if (!bucket) {
+        bucket = [];
+        grid.set(key, bucket);
+      }
+      bucket.push(newIdx);
+    }
+  }
+
+  // Smooth welded vertex coordinates by running centroid
+  const vertexSums = new Float64Array(weldedPositions.length * 4);
+  for (let i = 0; i < numVertices; i++) {
+    const w = vertexToWelded[i];
+    const off = w * 4;
+    vertexSums[off] += posAttr.getX(i);
+    vertexSums[off + 1] += posAttr.getY(i);
+    vertexSums[off + 2] += posAttr.getZ(i);
+    vertexSums[off + 3] += 1;
+  }
+  for (let w = 0; w < weldedPositions.length; w++) {
+    const off = w * 4;
+    const count = vertexSums[off + 3];
+    if (count > 0) {
+      weldedPositions[w][0] = vertexSums[off] / count;
+      weldedPositions[w][1] = vertexSums[off + 1] / count;
+      weldedPositions[w][2] = vertexSums[off + 2] / count;
+    }
+  }
+
+  const weldedVerticesCount = numVertices - weldedPositions.length;
+
+  // 2. EXTRACT TRIANGLES & REMOVE DEGENERATE FACES
+  const rawTriCount = indexAttr ? (indexAttr.count / 3) : (numVertices / 3);
+  const activeTriangles = []; // Array of [w0, w1, w2, origV0, origV1, origV2]
+
+  for (let t = 0; t < rawTriCount; t++) {
+    const i0 = indexAttr ? indexAttr.getX(t * 3) : (t * 3);
+    const i1 = indexAttr ? indexAttr.getX(t * 3 + 1) : (t * 3 + 1);
+    const i2 = indexAttr ? indexAttr.getX(t * 3 + 2) : (t * 3 + 2);
+
+    const w0 = vertexToWelded[i0];
+    const w1 = vertexToWelded[i1];
+    const w2 = vertexToWelded[i2];
+
+    // Skip degenerate triangles (collapsed edges)
+    if (w0 === w1 || w1 === w2 || w0 === w2) continue;
+
+    // Check triangle area
+    const p0 = weldedPositions[w0];
+    const p1 = weldedPositions[w1];
+    const p2 = weldedPositions[w2];
+    const e1x = p1[0] - p0[0], e1y = p1[1] - p0[1], e1z = p1[2] - p0[2];
+    const e2x = p2[0] - p0[0], e2y = p2[1] - p0[1], e2z = p2[2] - p0[2];
+    const cx = e1y * e2z - e1z * e2y;
+    const cy = e1z * e2x - e1x * e2z;
+    const cz = e1x * e2y - e1y * e2x;
+    const areaSq = cx * cx + cy * cy + cz * cz;
+    if (areaSq < 1e-14 * (maxDim * maxDim)) continue; // Sliver / zero-area triangle
+
+    activeTriangles.push([w0, w1, w2, i0, i1, i2]);
+  }
+
+  // 3. BUILD TOPOLOGICAL EDGE ADJACENCY & DETECT BOUNDARY EDGES
+  // undirected edge -> array of directed half-edges: { from, to, triIdx }
+  const undirectedEdgeMap = new Map();
+
+  for (let t = 0; t < activeTriangles.length; t++) {
+    const [w0, w1, w2] = activeTriangles[t];
+    const edges = [
+      [w0, w1],
+      [w1, w2],
+      [w2, w0]
+    ];
+
+    for (const [u, v] of edges) {
+      const minU = Math.min(u, v);
+      const maxU = Math.max(u, v);
+      const edgeKey = `${minU}_${maxU}`;
+
+      let edgeList = undirectedEdgeMap.get(edgeKey);
+      if (!edgeList) {
+        edgeList = [];
+        undirectedEdgeMap.set(edgeKey, edgeList);
+      }
+      edgeList.push({ from: u, to: v, triIdx: t });
+    }
+  }
+
+  // An open boundary edge belongs to only 1 triangle face
+  // If original triangle traversed u -> v, the hole boundary goes v -> u
+  const holeBoundaryMap = new Map(); // fromNode -> array of toNodes
+  let openEdgesBefore = 0;
+
+  for (const edgeList of undirectedEdgeMap.values()) {
+    if (edgeList.length === 1) {
+      openEdgesBefore++;
+      const { from, to } = edgeList[0];
+      // Hole boundary half-edge is in opposite direction to close the cycle
+      const holeFrom = to;
+      const holeTo = from;
+
+      let list = holeBoundaryMap.get(holeFrom);
+      if (!list) {
+        list = [];
+        holeBoundaryMap.set(holeFrom, list);
+      }
+      list.push(holeTo);
+    }
+  }
+
+  // 4. TRACE HOLE BOUNDARY LOOPS
+  const boundaryLoops = [];
+  const visitedEdges = new Set();
+
+  for (const [startNode, targets] of holeBoundaryMap.entries()) {
+    for (const targetNode of targets) {
+      const edgeKey = `${startNode}_${targetNode}`;
+      if (visitedEdges.has(edgeKey)) continue;
+
+      const loop = [startNode];
+      let curr = targetNode;
+      visitedEdges.add(edgeKey);
+      let isClosed = false;
+
+      while (curr !== undefined) {
+        loop.push(curr);
+        if (curr === startNode) {
+          isClosed = true;
+          loop.pop(); // remove duplicate tail
+          break;
+        }
+        if (loop.length > maxHoleEdges) break;
+
+        const nextTargets = holeBoundaryMap.get(curr);
+        if (!nextTargets || nextTargets.length === 0) break;
+
+        let nextNode = undefined;
+        for (const cand of nextTargets) {
+          const candEdgeKey = `${curr}_${cand}`;
+          if (!visitedEdges.has(candEdgeKey)) {
+            nextNode = cand;
+            visitedEdges.add(candEdgeKey);
+            break;
+          }
+        }
+        curr = nextNode;
+      }
+
+      if (isClosed && loop.length >= 3) {
+        boundaryLoops.push(loop);
+      }
+    }
+  }
+
+  // 5. TRIANGULATE & CLOSE HOLES
+  let holesClosed = 0;
+  let addedTrianglesCount = 0;
+  const holeTriangles = []; // Array of [w0, w1, w2]
+
+  if (closeHoles && boundaryLoops.length > 0) {
+    for (const loop of boundaryLoops) {
+      const tris = triangulateBoundaryLoop(loop, weldedPositions, weldedUvs);
+      if (tris.length > 0) {
+        holesClosed++;
+        addedTrianglesCount += tris.length;
+        for (const t of tris) {
+          holeTriangles.push(t);
+        }
+      }
+    }
+  }
+
+  // 6. ASSEMBLE NEW BUFFER GEOMETRY WITH SMOOTH ANGLE-WEIGHTED NORMALS
+  const totalTriangles = activeTriangles.length + holeTriangles.length;
+  const newPositions = new Float32Array(totalTriangles * 9);
+  const newNormals = new Float32Array(totalTriangles * 9);
+  const newUvs = uvAttr ? new Float32Array(totalTriangles * 6) : null;
+
+  // Build vertex normal accumulators (angle-weighted normals across all welded vertices)
+  const normalAccum = new Float64Array(weldedPositions.length * 3);
+
+  const accumulateNormal = (w0, w1, w2) => {
+    const p0 = weldedPositions[w0];
+    const p1 = weldedPositions[w1];
+    const p2 = weldedPositions[w2];
+
+    const v10x = p1[0] - p0[0], v10y = p1[1] - p0[1], v10z = p1[2] - p0[2];
+    const v20x = p2[0] - p0[0], v20y = p2[1] - p0[1], v20z = p2[2] - p0[2];
+    const v21x = p2[0] - p1[0], v21y = p2[1] - p1[1], v21z = p2[2] - p1[2];
+
+    const fnX = v10y * v20z - v10z * v20y;
+    const fnY = v10z * v20x - v10x * v20z;
+    const fnZ = v10x * v20y - v10y * v20x;
+    const fnLen = Math.sqrt(fnX * fnX + fnY * fnY + fnZ * fnZ);
+    if (fnLen < 1e-12) return;
+
+    const unX = fnX / fnLen, unY = fnY / fnLen, unZ = fnZ / fnLen;
+
+    const l10 = Math.sqrt(v10x * v10x + v10y * v10y + v10z * v10z);
+    const l20 = Math.sqrt(v20x * v20x + v20y * v20y + v20z * v20z);
+    const l21 = Math.sqrt(v21x * v21x + v21y * v21y + v21z * v21z);
+
+    if (l10 > 1e-9 && l20 > 1e-9 && l21 > 1e-9) {
+      const dot0 = (v10x * v20x + v10y * v20y + v10z * v20z) / (l10 * l20);
+      const dot1 = (-v10x * v21x - v10y * v21y - v10z * v21z) / (l10 * l21);
+      const dot2 = (v20x * v21x + v20y * v21y + v20z * v21z) / (l20 * l21);
+
+      const a0 = Math.acos(Math.max(-1, Math.min(1, dot0)));
+      const a1 = Math.acos(Math.max(-1, Math.min(1, dot1)));
+      const a2 = Math.acos(Math.max(-1, Math.min(1, dot2)));
+
+      normalAccum[w0 * 3] += unX * a0; normalAccum[w0 * 3 + 1] += unY * a0; normalAccum[w0 * 3 + 2] += unZ * a0;
+      normalAccum[w1 * 3] += unX * a1; normalAccum[w1 * 3 + 1] += unY * a1; normalAccum[w1 * 3 + 2] += unZ * a1;
+      normalAccum[w2 * 3] += unX * a2; normalAccum[w2 * 3 + 1] += unY * a2; normalAccum[w2 * 3 + 2] += unZ * a2;
+    }
+  };
+
+  for (let t = 0; t < activeTriangles.length; t++) {
+    const [w0, w1, w2] = activeTriangles[t];
+    accumulateNormal(w0, w1, w2);
+  }
+  for (let t = 0; t < holeTriangles.length; t++) {
+    const [w0, w1, w2] = holeTriangles[t];
+    accumulateNormal(w0, w1, w2);
+  }
+
+  // Normalize accumulated normal table
+  const normalTable = new Float32Array(weldedPositions.length * 3);
+  for (let w = 0; w < weldedPositions.length; w++) {
+    const nx = normalAccum[w * 3];
+    const ny = normalAccum[w * 3 + 1];
+    const nz = normalAccum[w * 3 + 2];
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (len > 1e-12) {
+      normalTable[w * 3] = nx / len;
+      normalTable[w * 3 + 1] = ny / len;
+      normalTable[w * 3 + 2] = nz / len;
+    } else {
+      normalTable[w * 3 + 1] = 1.0;
+    }
+  }
+
+  // Populate output buffer arrays
+  let vPtr = 0;
+  let uvPtr = 0;
+
+  // 6A. Original active triangles (with welded positions, intact original UVs per face)
+  for (let t = 0; t < activeTriangles.length; t++) {
+    const [w0, w1, w2, orig0, orig1, orig2] = activeTriangles[t];
+    const ws = [w0, w1, w2];
+    const origs = [orig0, orig1, orig2];
+
+    for (let k = 0; k < 3; k++) {
+      const w = ws[k];
+      const p = weldedPositions[w];
+      newPositions[vPtr] = p[0];
+      newPositions[vPtr + 1] = p[1];
+      newPositions[vPtr + 2] = p[2];
+
+      newNormals[vPtr] = normalTable[w * 3];
+      newNormals[vPtr + 1] = normalTable[w * 3 + 1];
+      newNormals[vPtr + 2] = normalTable[w * 3 + 2];
+      vPtr += 3;
+
+      if (newUvs) {
+        const origIdx = origs[k];
+        newUvs[uvPtr++] = uvAttr.getX(origIdx);
+        newUvs[uvPtr++] = uvAttr.getY(origIdx);
+      }
+    }
+  }
+
+  // 6B. Hole-capping triangles
+  for (let t = 0; t < holeTriangles.length; t++) {
+    const [w0, w1, w2] = holeTriangles[t];
+    const ws = [w0, w1, w2];
+
+    for (let k = 0; k < 3; k++) {
+      const w = ws[k];
+      const p = weldedPositions[w];
+      newPositions[vPtr] = p[0];
+      newPositions[vPtr + 1] = p[1];
+      newPositions[vPtr + 2] = p[2];
+
+      newNormals[vPtr] = normalTable[w * 3];
+      newNormals[vPtr + 1] = normalTable[w * 3 + 1];
+      newNormals[vPtr + 2] = normalTable[w * 3 + 2];
+      vPtr += 3;
+
+      if (newUvs) {
+        const uv = weldedUvs[w] || [0.5, 0.5];
+        newUvs[uvPtr++] = uv[0];
+        newUvs[uvPtr++] = uv[1];
+      }
+    }
+  }
+
+  const repairedGeo = new THREE.BufferGeometry();
+  repairedGeo.setAttribute('position', new THREE.BufferAttribute(newPositions, 3));
+  repairedGeo.setAttribute('normal', new THREE.BufferAttribute(newNormals, 3));
+  if (newUvs) {
+    repairedGeo.setAttribute('uv', new THREE.BufferAttribute(newUvs, 2));
+  }
+
+  // Preserve groups if multi-material
+  if (geometry.groups && geometry.groups.length > 0) {
+    const scaleFactor = activeTriangles.length / Math.max(1, rawTriCount);
+    for (const g of geometry.groups) {
+      repairedGeo.addGroup(Math.round(g.start * scaleFactor), Math.round(g.count * scaleFactor), g.materialIndex);
+    }
+    if (holeTriangles.length > 0) {
+      // Assign hole caps to material 0
+      repairedGeo.addGroup(activeTriangles.length * 3, holeTriangles.length * 3, 0);
+    }
+  }
+
+  repairedGeo.computeBoundingBox();
+  repairedGeo.computeBoundingSphere();
+
+  const openEdgesAfter = Math.max(0, openEdgesBefore - (holesClosed * 3));
+  const isWatertight = openEdgesAfter === 0 && openEdgesBefore > 0 ? true : (openEdgesBefore === 0);
+
+  return {
+    geometry: repairedGeo,
+    stats: {
+      weldedVertices: weldedVerticesCount,
+      holesClosed,
+      addedTriangles: addedTrianglesCount,
+      openEdgesBefore,
+      openEdgesAfter,
+      isWatertight,
+      totalTriangles
+    }
+  };
+}
+
+/**
+ * Merges all mesh children in rootObject into a single unified mesh with combined geometry.
+ */
+export function mergeDisjointMeshes(rootObject) {
+  if (!rootObject) return null;
+  const meshes = [];
+  rootObject.traverse(child => {
+    if (child.isMesh && child.geometry) meshes.push(child);
+  });
+
+  if (meshes.length <= 1) return null;
+
+  rootObject.updateMatrixWorld(true);
+  const rootInverse = rootObject.matrixWorld.clone().invert();
+
+  let totalVerts = 0;
+  for (const m of meshes) {
+    const g = m.geometry;
+    const count = g.index ? g.index.count : g.attributes.position.count;
+    totalVerts += count;
+  }
+
+  const mergedPos = new Float32Array(totalVerts * 3);
+  const mergedUvs = new Float32Array(totalVerts * 2);
+  const materials = [];
+  const groups = [];
+
+  let vertOffset = 0;
+  let uvOffset = 0;
+
+  for (const m of meshes) {
+    const g = m.geometry;
+    const pos = g.attributes.position;
+    const uv = g.attributes.uv;
+    const idx = g.index;
+    const triCount = idx ? (idx.count / 3) : (pos.count / 3);
+
+    const worldMatrix = m.matrixWorld.clone().premultiply(rootInverse);
+
+    let matIndex = materials.indexOf(m.material);
+    if (matIndex === -1) {
+      matIndex = materials.length;
+      materials.push(m.material);
+    }
+
+    const groupStart = vertOffset / 3;
+    const groupCount = triCount * 3;
+
+    const tempV = new THREE.Vector3();
+    for (let t = 0; t < triCount; t++) {
+      for (let k = 0; k < 3; k++) {
+        const vi = idx ? idx.getX(t * 3 + k) : (t * 3 + k);
+        tempV.set(pos.getX(vi), pos.getY(vi), pos.getZ(vi)).applyMatrix4(worldMatrix);
+
+        mergedPos[vertOffset++] = tempV.x;
+        mergedPos[vertOffset++] = tempV.y;
+        mergedPos[vertOffset++] = tempV.z;
+
+        if (uv) {
+          mergedUvs[uvOffset++] = uv.getX(vi);
+          mergedUvs[uvOffset++] = uv.getY(vi);
+        } else {
+          mergedUvs[uvOffset++] = 0;
+          mergedUvs[uvOffset++] = 0;
+        }
+      }
+    }
+
+    groups.push({ start: groupStart, count: groupCount, materialIndex: matIndex });
+  }
+
+  const combinedGeo = new THREE.BufferGeometry();
+  combinedGeo.setAttribute('position', new THREE.BufferAttribute(mergedPos, 3));
+  combinedGeo.setAttribute('uv', new THREE.BufferAttribute(mergedUvs, 2));
+  for (const grp of groups) {
+    combinedGeo.addGroup(grp.start, grp.count, grp.materialIndex);
+  }
+
+  return {
+    combinedGeo,
+    materials: materials.length === 1 ? materials[0] : materials,
+    originalChildren: [...rootObject.children]
+  };
+}
+
+/**
+ * Analyzes health, watertightness, boundary edges, and disjoint parts of a model.
+ */
+export function analyzeMeshHealth(rootObject, tolerance = 0) {
+  if (!rootObject) {
+    return {
+      isWatertight: false,
+      openEdgesCount: 0,
+      holesCount: 0,
+      submeshCount: 0,
+      triangles: 0,
+      vertices: 0,
+      weldableVertices: 0
+    };
+  }
+
+  let totalTriangles = 0;
+  let totalVertices = 0;
+  let submeshCount = 0;
+  let openEdgesTotal = 0;
+  let holesTotal = 0;
+  let weldableTotal = 0;
+
+  rootObject.traverse(child => {
+    if (child.isMesh && child.geometry) {
+      submeshCount++;
+      const geo = child.geometry;
+      const pos = geo.attributes.position;
+      if (!pos) return;
+
+      const vCount = pos.count;
+      totalVertices += vCount;
+      const tCount = geo.index ? (geo.index.count / 3) : (vCount / 3);
+      totalTriangles += tCount;
+
+      // Quick diagnostic run using repairBufferGeometry in dry-run mode
+      const diag = repairBufferGeometry(geo, { tolerance, closeHoles: false });
+      if (diag && diag.stats) {
+        openEdgesTotal += diag.stats.openEdgesBefore;
+        weldableTotal += diag.stats.weldedVertices;
+      }
+    }
+  });
+
+  return {
+    isWatertight: openEdgesTotal === 0 && totalTriangles > 0,
+    openEdgesCount: openEdgesTotal,
+    holesCount: holesTotal,
+    submeshCount,
+    triangles: totalTriangles,
+    vertices: totalVertices,
+    weldableVertices: weldableTotal
+  };
+}
+
+/**
+ * Applies live mesh repair across the root model, welding disjoint seams and closing holes.
+ */
+export function applyLiveMeshRepair(rootObject, {
+  enabled = true,
+  tolerance = 0,
+  closeHoles = true,
+  joinSubmeshes = false
+} = {}) {
+  if (!rootObject) return null;
+
+  if (!enabled) {
+    return restoreOriginalMesh(rootObject);
+  }
+
+  // If joinSubmeshes is requested and there are multiple meshes, merge them into a single mesh
+  const meshCount = [];
+  rootObject.traverse(c => { if (c.isMesh && c.geometry) meshCount.push(c); });
+
+  if (joinSubmeshes && meshCount.length > 1 && !rootObject._isMerged) {
+    const merged = mergeDisjointMeshes(rootObject);
+    if (merged) {
+      rootObject._originalChildren = merged.originalChildren;
+      while (rootObject.children.length > 0) {
+        rootObject.remove(rootObject.children[0]);
+      }
+      const singleMesh = new THREE.Mesh(merged.combinedGeo, merged.materials);
+      singleMesh.name = 'Unified_Repaired_Mesh';
+      rootObject.add(singleMesh);
+      rootObject._isMerged = true;
+    }
+  }
+
+  let totalWelded = 0;
+  let totalHolesClosed = 0;
+  let totalAddedTris = 0;
+  let totalOpenBefore = 0;
+  let totalOpenAfter = 0;
+  let totalTris = 0;
+
+  rootObject.traverse(child => {
+    if (child.isMesh && child.geometry) {
+      if (!child._originalGeometry) {
+        child._originalGeometry = child.geometry.clone();
+      }
+
+      const res = repairBufferGeometry(child._originalGeometry, {
+        tolerance,
+        closeHoles
+      });
+
+      if (res && res.geometry) {
+        child.geometry = res.geometry;
+        if (res.stats) {
+          totalWelded += res.stats.weldedVertices;
+          totalHolesClosed += res.stats.holesClosed;
+          totalAddedTris += res.stats.addedTriangles;
+          totalOpenBefore += res.stats.openEdgesBefore;
+          totalOpenAfter += res.stats.openEdgesAfter;
+          totalTris += res.stats.totalTriangles;
+        }
+      }
+    }
+  });
+
+  const isWatertight = totalOpenAfter === 0 && totalTris > 0;
+
+  return {
+    weldedVertices: totalWelded,
+    holesClosed: totalHolesClosed,
+    addedTriangles: totalAddedTris,
+    openEdgesBefore: totalOpenBefore,
+    openEdgesAfter: totalOpenAfter,
+    isWatertight,
+    totalTriangles: totalTris,
+    isMerged: Boolean(rootObject._isMerged)
+  };
+}
+
+/**
+ * Restores the original unmodified geometry and hierarchy.
+ */
+export function restoreOriginalMesh(rootObject) {
+  if (!rootObject) return null;
+
+  // Restore hierarchy if meshes were joined
+  if (rootObject._isMerged && rootObject._originalChildren) {
+    while (rootObject.children.length > 0) {
+      rootObject.remove(rootObject.children[0]);
+    }
+    for (const child of rootObject._originalChildren) {
+      rootObject.add(child);
+    }
+    rootObject._isMerged = false;
+    rootObject._originalChildren = null;
+  }
+
+  let totalTris = 0;
+  rootObject.traverse(child => {
+    if (child.isMesh && child._originalGeometry) {
+      child.geometry = child._originalGeometry.clone();
+      child.geometry.computeBoundingBox();
+      child.geometry.computeBoundingSphere();
+      const count = child.geometry.index ? (child.geometry.index.count / 3) : (child.geometry.attributes.position.count / 3);
+      totalTris += count;
+    }
+  });
+
+  return {
+    restored: true,
+    totalTriangles: totalTris
+  };
+}

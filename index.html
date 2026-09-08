@@ -677,6 +677,68 @@
       color: var(--warn);
     }
 
+    .badge-ok {
+      background: rgba(6, 214, 160, .2);
+      color: var(--success);
+    }
+
+    /* Mesh Repair Diagnostics */
+    .repair-diag-card {
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: rgba(0, 0, 0, 0.28);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .repair-diag-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .repair-diag-status {
+      font-weight: 600;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .repair-diag-status.ok {
+      color: var(--success);
+    }
+
+    .repair-diag-status.warn {
+      color: var(--warn);
+    }
+
+    .repair-diag-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px 8px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .repair-diag-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 10px;
+    }
+
+    .repair-diag-label {
+      color: var(--text-faint);
+    }
+
+    .repair-diag-val {
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      color: var(--text);
+    }
+
     /* switch toggle */
     .switch {
       position: relative;
@@ -1074,6 +1136,82 @@
       <p class="proc-desc">Inverts V coordinates in real time for immediate visual inspection in the 3D viewport.</p>
     </div>
 
+    <!-- Mesh Repair & Sealing (Welding, Disjoint Mesh Healing, Hole Closing) -->
+    <div class="proc-section">
+      <div class="proc-label-row">
+        <span class="proc-label">Mesh Repair &amp; Weld</span>
+        <span class="status-badge badge-normal" id="repair-badge">OFF</span>
+      </div>
+
+      <!-- Main Toggle: Weld & Seal Mesh -->
+      <div class="toggle-row" style="margin-bottom: 6px;">
+        <span class="toggle-text">Weld &amp; Seal Mesh</span>
+        <label class="switch" for="proc-repair-toggle" aria-label="Weld and Seal Mesh">
+          <input type="checkbox" id="proc-repair-toggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <!-- Close Open Holes Sub-toggle -->
+      <div class="toggle-row" style="margin-bottom: 6px;">
+        <span class="toggle-text">Close Holes / Seal Openings</span>
+        <label class="switch" for="proc-close-holes" aria-label="Close Holes and Openings">
+          <input type="checkbox" id="proc-close-holes" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <!-- Join Disjoint Sub-Meshes Sub-toggle -->
+      <div class="toggle-row" style="margin-bottom: 6px;">
+        <span class="toggle-text">Join Disjoint Sub-Meshes</span>
+        <label class="switch" for="proc-join-submeshes" aria-label="Join Disjoint Sub-Meshes">
+          <input type="checkbox" id="proc-join-submeshes" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <!-- Weld Distance / Snap Tolerance -->
+      <div class="proc-label-row" style="margin-top: 4px;">
+        <label for="proc-weld-slider" class="proc-tag">Weld Distance / Snap</label>
+        <span id="proc-weld-badge" style="font-size: 10px; color: var(--text-faint);">0.001</span>
+      </div>
+      <div class="proc-slider-row">
+        <input type="range" id="proc-weld-slider" min="0.0001" max="0.02" step="0.0005" value="0.001">
+        <input type="number" id="proc-weld-num" min="0.00001" max="0.5" step="0.0005" value="0.001"
+          class="proc-num-input" style="width: 58px;">
+      </div>
+
+      <!-- Mesh Diagnostics Card -->
+      <div class="repair-diag-card">
+        <div class="repair-diag-header">
+          <span class="repair-diag-status" id="diag-status-indicator">● Checking mesh…</span>
+          <button class="btn" id="proc-reanalyze-btn" type="button"
+            style="padding: 2px 8px; font-size: 10px; height: 20px;">Inspect</button>
+        </div>
+        <div class="repair-diag-grid">
+          <div class="repair-diag-item">
+            <span class="repair-diag-label">Open Edges</span>
+            <span class="repair-diag-val" id="diag-open-edges">-</span>
+          </div>
+          <div class="repair-diag-item">
+            <span class="repair-diag-label">Holes</span>
+            <span class="repair-diag-val" id="diag-holes">-</span>
+          </div>
+          <div class="repair-diag-item">
+            <span class="repair-diag-label">Sub-Meshes</span>
+            <span class="repair-diag-val" id="diag-submeshes">-</span>
+          </div>
+          <div class="repair-diag-item">
+            <span class="repair-diag-label">Weldable Verts</span>
+            <span class="repair-diag-val" id="diag-welded">-</span>
+          </div>
+        </div>
+      </div>
+
+      <p class="proc-desc">Snaps disjoint seam vertices, closes open boundary holes, and heals disconnected game asset
+        meshes.</p>
+    </div>
+
     <!-- Color Quantization Control -->
     <div class="proc-section">
       <div class="proc-label-row">
@@ -1215,7 +1353,7 @@
       <p>or click to browse one or more files</p>
     </div>
     <div class="formats">Imports <b>.glb</b>, <b>.gltf</b>, <b>.obj</b>, <b>.stl</b>, <b>.ply</b>,
-      <b>.dae</b>, <b>.3mf</b>, <b>.fbx</b> &middot; processed locally, nothing uploaded
+      <b>.dae</b>, <b>.3mf</b>, <b>.fbx</b>, <b>.zip</b> &middot; processed locally, nothing uploaded
     </div>
   </div>
 
@@ -1226,7 +1364,7 @@
   <div id="toast" class="hidden"></div>
 
   <!-- file input -->
-  <input id="picker" type="file" accept=".meshy,.glb,.gltf,.obj,.stl,.ply,.dae,.3mf,.fbx" multiple hidden>
+  <input id="picker" type="file" accept=".meshy,.glb,.gltf,.obj,.stl,.ply,.dae,.3mf,.fbx,.zip" multiple hidden>
 
   <!-- footer -->
   <div id="foot">
@@ -1244,7 +1382,10 @@
       exportMultiColor3MF,
       exportProcessedGlb,
       linkGlbOriginalTextures,
-      getModelTextures
+      getModelTextures,
+      applyLiveMeshRepair,
+      restoreOriginalMesh,
+      analyzeMeshHealth
     } from './src/processor.js';
     import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
     import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -1259,6 +1400,8 @@
     import { STLExporter } from 'three/addons/exporters/STLExporter.js';
     import { PLYExporter } from 'three/addons/exporters/PLYExporter.js';
     import { USDZExporter } from 'three/addons/exporters/USDZExporter.js';
+    import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
+    import { unzipSync } from 'fflate';
 
     const $ = id => document.getElementById(id);
     const $toast = $('toast');
@@ -1274,6 +1417,19 @@
     const $procFormat = $('proc-texture-format');
     const $procUvFlip = $('proc-uv-flip');
     const $uvBadge = $('uv-status-badge');
+    const $procRepairToggle = $('proc-repair-toggle');
+    const $procCloseHoles = $('proc-close-holes');
+    const $procJoinSubmeshes = $('proc-join-submeshes');
+    const $repairBadge = $('repair-badge');
+    const $weldSlider = $('proc-weld-slider');
+    const $weldNum = $('proc-weld-num');
+    const $weldBadge = $('proc-weld-badge');
+    const $diagStatus = $('diag-status-indicator');
+    const $diagOpenEdges = $('diag-open-edges');
+    const $diagHoles = $('diag-holes');
+    const $diagSubmeshes = $('diag-submeshes');
+    const $diagWelded = $('diag-welded');
+    const $reanalyzeBtn = $('proc-reanalyze-btn');
     const $exportProcBtn = $('export-processed-btn');
     const $procBadge = $('proc-model-badge');
     const $textureList = $('proc-texture-list');
@@ -1300,12 +1456,19 @@
 
     const viewer = new Viewer();
     let lastBaseName = '';
+    let lastLoadedFormat = '';
+    let lastLoadedSizeMb = '';
     let lastSourceGlbBuffer = null;
     let lastResourceUrls = [];
     let activePalette = [];
 
-    const IMPORT_FORMATS = new Set(['meshy', 'glb', 'gltf', 'obj', 'stl', 'ply', 'dae', '3mf', 'fbx']);
-    const IMPORT_FORMAT_LABEL = '.meshy, .glb, .gltf, .obj, .stl, .ply, .dae, .3mf, or .fbx';
+    function updateInfoDisplay(triangles) {
+      if (!lastBaseName) return;
+      $info.innerHTML = `<b>${lastBaseName}</b> &mdash; ${lastLoadedFormat} &middot; ${lastLoadedSizeMb} MB &middot; ${triangles.toLocaleString()} triangles`;
+    }
+
+    const IMPORT_FORMATS = new Set(['meshy', 'glb', 'gltf', 'obj', 'stl', 'ply', 'dae', '3mf', 'fbx', 'zip']);
+    const IMPORT_FORMAT_LABEL = '.meshy, .glb, .gltf, .obj, .stl, .ply, .dae, .3mf, .fbx, or .zip';
 
     function extensionFor(name) {
       return name.toLowerCase().split('.').pop() || '';
@@ -1327,19 +1490,21 @@
       for (const file of files) {
         const url = URL.createObjectURL(file);
         urls.push(url);
-        const names = [
-          file.name,
-          `./${file.name}`,
-          encodeURI(file.name),
-          `./${encodeURI(file.name)}`,
-        ];
-        for (const name of names) byName.set(name, url);
+
+        // Store by clean filename, relative path, and encoded path
+        const baseName = file.name.split('/').pop();
+        byName.set(file.name, url);
+        byName.set(`./${file.name}`, url);
+        byName.set(baseName, url);
+        byName.set(`./${baseName}`, url);
+        byName.set(`textures/${baseName}`, url);
+        byName.set(`./textures/${baseName}`, url);
       }
 
       manager.setURLModifier(url => {
         const clean = decodeURIComponent(url.split(/[?#]/)[0]);
-        const basename = clean.split('/').pop();
-        return byName.get(clean) || byName.get(clean.replace(/^\.\//u, '')) || byName.get(basename) || url;
+        const base = clean.split('/').pop();
+        return byName.get(clean) || byName.get(clean.replace(/^\.\//u, '')) || byName.get(base) || url;
       });
 
       return { manager, urls };
@@ -1366,7 +1531,7 @@
       return object;
     }
 
-    async function loadObjectFromFile(file, manager) {
+    async function loadObjectFromFile(file, manager, files = []) {
       const buffer = await file.arrayBuffer();
       const ext = extensionFor(file.name);
       const sizeMb = (buffer.byteLength / 1024 / 1024).toFixed(2);
@@ -1416,8 +1581,19 @@
 
       if (ext === 'obj') {
         const text = new TextDecoder().decode(buffer);
+        const objLoader = new OBJLoader(manager);
+
+        // Check if there is an .mtl file in the uploaded files or zip
+        const mtlFile = files.find(f => extensionFor(f.name) === 'mtl');
+        if (mtlFile) {
+          const mtlText = new TextDecoder().decode(await mtlFile.arrayBuffer());
+          const materials = new MTLLoader(manager).parse(mtlText, '');
+          materials.preload();
+          objLoader.setMaterials(materials);
+        }
+
         return {
-          object: assertHasMesh(new OBJLoader(manager).parse(text)),
+          object: assertHasMesh(objLoader.parse(text)),
           sourceFormat: ext,
           sizeBytes: buffer.byteLength,
         };
@@ -1493,29 +1669,57 @@
     }
 
     async function handleFiles(fileList) {
-      const files = Array.from(fileList);
-      const primary = files.find(file => IMPORT_FORMATS.has(extensionFor(file.name)));
-      if (!primary) throw new Error(`No supported 3D file found. Try ${IMPORT_FORMAT_LABEL}.`);
+      let files = Array.from(fileList);
+
+      // If a .zip was dropped or selected, unpack it in-memory
+      const zipFile = files.find(f => extensionFor(f.name) === 'zip');
+      if (zipFile) {
+        toast(`Unpacking ${zipFile.name}…`);
+        const buffer = await zipFile.arrayBuffer();
+        const unzipped = unzipSync(new Uint8Array(buffer));
+        const extractedFiles = [];
+
+        for (const [relativePath, data] of Object.entries(unzipped)) {
+          // Skip directories or hidden mac __MACOSX files
+          if (relativePath.endsWith('/') || relativePath.includes('__MACOSX')) continue;
+          const fileName = relativePath.split('/').pop();
+          const mime = fileName.endsWith('.png') ? 'image/png'
+            : fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') ? 'image/jpeg'
+              : 'application/octet-stream';
+          extractedFiles.push(new File([data], fileName, { type: mime }));
+        }
+        files = extractedFiles;
+      }
+
+      const primary = files.find(file => IMPORT_FORMATS.has(extensionFor(file.name)) && extensionFor(file.name) !== 'zip');
+      if (!primary) throw new Error(`No supported 3D file found inside. Try ${IMPORT_FORMAT_LABEL}.`);
 
       $empty.classList.add('hide');
       lastBaseName = baseNameFor(primary.name);
       const resources = createResourceManager(files);
 
       try {
-        const loaded = await loadObjectFromFile(primary, resources.manager);
+        const loaded = await loadObjectFromFile(primary, resources.manager, files);
         const { triangles } = viewer.loadObject(loaded.object);
         revokeUrls(lastResourceUrls);
         lastResourceUrls = resources.urls;
         lastSourceGlbBuffer = loaded.sourceGlbBuffer ?? null;
-        const sizeMb = (loaded.sizeBytes / 1024 / 1024).toFixed(2);
-        $info.innerHTML = `<b>${lastBaseName}</b> &mdash; ${loaded.sourceFormat.toUpperCase()} &middot; ${sizeMb} MB &middot; ${triangles.toLocaleString()} triangles`;
+        lastLoadedFormat = loaded.sourceFormat.toUpperCase();
+        lastLoadedSizeMb = (loaded.sizeBytes / 1024 / 1024).toFixed(2);
+        updateInfoDisplay(triangles);
 
         $procUvFlip.checked = false;
         $uvBadge.textContent = 'NORMAL';
         $uvBadge.className = 'status-badge badge-normal';
-        $procBadge.textContent = loaded.sourceFormat.toUpperCase();
+        $procBadge.textContent = lastLoadedFormat;
         updateTextureListUI();
         $procToolbar.classList.add('show');
+
+        // Analyze mesh health and apply repair if toggle is active
+        updateMeshDiagnostics();
+        if ($procRepairToggle.checked) {
+          updateMeshRepair(false);
+        }
 
         // Initialize palette and swatches immediately on file load
         activePalette = [];
@@ -1827,6 +2031,126 @@
       if ($quantizeToggle.checked) {
         updateQuantization(false);
       }
+    });
+
+    // ── Mesh Repair & Sealing Logic ──────────────────────────────────────────
+
+    function updateMeshDiagnostics() {
+      if (!viewer.currentModel) {
+        $diagStatus.textContent = '● No model loaded';
+        $diagStatus.className = 'repair-diag-status';
+        $diagOpenEdges.textContent = '-';
+        $diagHoles.textContent = '-';
+        $diagSubmeshes.textContent = '-';
+        $diagWelded.textContent = '-';
+        return;
+      }
+      const tol = parseFloat($weldNum.value || '0.001');
+      const health = analyzeMeshHealth(viewer.currentModel, tol);
+
+      $diagOpenEdges.textContent = health.openEdgesCount.toLocaleString();
+      $diagHoles.textContent = health.holesCount.toLocaleString();
+      $diagSubmeshes.textContent = health.submeshCount.toLocaleString();
+      $diagWelded.textContent = health.weldableVertices.toLocaleString();
+
+      if (health.isWatertight) {
+        $diagStatus.textContent = '● Watertight Solid';
+        $diagStatus.className = 'repair-diag-status ok';
+        if (!$procRepairToggle.checked) {
+          $repairBadge.textContent = 'SOLID';
+          $repairBadge.className = 'status-badge badge-ok';
+        }
+      } else {
+        $diagStatus.textContent = `● ${health.openEdgesCount} Open Edges (Disjoint)`;
+        $diagStatus.className = 'repair-diag-status warn';
+        if (!$procRepairToggle.checked) {
+          $repairBadge.textContent = 'DISJOINT';
+          $repairBadge.className = 'status-badge badge-warn';
+        }
+      }
+    }
+
+    let repairTimer;
+    function updateMeshRepair(showToast = true) {
+      clearTimeout(repairTimer);
+      repairTimer = setTimeout(() => {
+        if (!viewer.currentModel) return;
+        const enabled = $procRepairToggle.checked;
+        const closeHoles = $procCloseHoles.checked;
+        const joinSubmeshes = $procJoinSubmeshes.checked;
+        const tol = parseFloat($weldNum.value || '0.001');
+
+        if (!enabled) {
+          restoreOriginalMesh(viewer.currentModel);
+          viewer.applyMaterialSettings();
+          const triCount = viewer.countTriangles(viewer.currentModel);
+          updateInfoDisplay(triCount);
+          updateMeshDiagnostics();
+          $repairBadge.textContent = 'OFF';
+          $repairBadge.className = 'status-badge badge-normal';
+          if (showToast) toast('Mesh restored to original', 'work', 1500);
+          if ($quantizeToggle.checked) updateQuantization(false);
+          return;
+        }
+
+        const res = applyLiveMeshRepair(viewer.currentModel, {
+          enabled: true,
+          tolerance: tol,
+          closeHoles,
+          joinSubmeshes
+        });
+
+        viewer.applyMaterialSettings();
+        const triCount = viewer.countTriangles(viewer.currentModel);
+        updateInfoDisplay(triCount);
+
+        $repairBadge.textContent = res.isWatertight ? 'SEALED' : 'WELDED';
+        $repairBadge.className = 'status-badge ' + (res.isWatertight ? 'badge-ok' : 'badge-warn');
+
+        $diagStatus.textContent = res.isWatertight ? '● Sealed Watertight' : `● ${res.openEdgesAfter} Open Edges`;
+        $diagStatus.className = 'repair-diag-status ' + (res.isWatertight ? 'ok' : 'warn');
+        $diagOpenEdges.textContent = res.openEdgesAfter.toLocaleString();
+        $diagWelded.textContent = res.weldedVertices.toLocaleString();
+        $diagHoles.textContent = res.holesClosed > 0 ? `${res.holesClosed} sealed` : '0';
+
+        if (showToast) {
+          const msg = `Repaired: ${res.weldedVertices.toLocaleString()} vertices welded${res.holesClosed > 0 ? `, ${res.holesClosed} holes sealed (+${res.addedTriangles} tris)` : ''}`;
+          toast(msg, 'ok', 3000);
+        }
+
+        if ($quantizeToggle.checked) updateQuantization(false);
+      }, 30);
+    }
+
+    $procRepairToggle.addEventListener('change', () => {
+      updateMeshRepair(true);
+    });
+
+    $procCloseHoles.addEventListener('change', () => {
+      if ($procRepairToggle.checked) updateMeshRepair(true);
+    });
+
+    $procJoinSubmeshes.addEventListener('change', () => {
+      if ($procRepairToggle.checked) updateMeshRepair(true);
+    });
+
+    $weldSlider.addEventListener('input', e => {
+      $weldNum.value = e.target.value;
+      $weldBadge.textContent = e.target.value;
+      if ($procRepairToggle.checked) updateMeshRepair(false);
+    });
+
+    $weldNum.addEventListener('input', e => {
+      let val = parseFloat(e.target.value);
+      if (isNaN(val) || val <= 0) val = 0.0001;
+      $weldSlider.value = Math.min(val, 0.02);
+      $weldBadge.textContent = val.toString();
+      if ($procRepairToggle.checked) updateMeshRepair(false);
+    });
+
+    $reanalyzeBtn.addEventListener('click', () => {
+      updateMeshDiagnostics();
+      toast('Mesh geometry inspected', 'ok', 1500);
     });
 
     // Main download button
