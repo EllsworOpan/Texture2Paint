@@ -2,6 +2,7 @@ import * as THREE          from 'three';
 import { GLTFLoader }       from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment }  from 'three/addons/environments/RoomEnvironment.js';
+import { applyUvFlip, getModelTextures } from './processor.js';
 
 export class Viewer {
   constructor({ container = document.body, background = 0x1a1a2e } = {}) {
@@ -37,6 +38,7 @@ export class Viewer {
     this.scene.add(this._dirLight);
 
     this._wireframe = false;
+    this._isUvFlipped = false;
 
     addEventListener('resize', () => this._onResize());
 
@@ -139,15 +141,33 @@ export class Viewer {
     return n;
   }
 
+  setUvFlipped(on) {
+    this._isUvFlipped = Boolean(on);
+    if (this.currentModel) {
+      applyUvFlip(this.currentModel, this._isUvFlipped);
+    }
+  }
+
+  isUvFlipped() {
+    return this._isUvFlipped;
+  }
+
+  getTextures() {
+    return getModelTextures(this.currentModel);
+  }
+
   loadObject(object) {
     if (this.currentModel) this.scene.remove(this.currentModel);
     this.currentModel = object;
+    this._isUvFlipped = false;
+    applyUvFlip(this.currentModel, false); // Initialize original UV cache
     this._applyMaterialSettings(this.currentModel);
     this.scene.add(this.currentModel);
     this._frame(this.currentModel);
 
     return {
       triangles: this.countTriangles(this.currentModel),
+      textures: getModelTextures(this.currentModel),
     };
   }
 
@@ -163,6 +183,7 @@ export class Viewer {
     return {
       blobUrl: url,
       triangles: loaded.triangles,
+      textures: loaded.textures,
       sceneJson: gltf.parser?.json,
     };
   }

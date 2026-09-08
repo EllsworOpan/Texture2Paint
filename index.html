@@ -1,33 +1,36 @@
 <!doctype html>
 <html lang="en">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>meshy2glb - Meshy to GLB, glTF, OBJ, STL &amp; USDZ Converter</title>
-<meta name="description" content="Convert Meshy .meshy files and common 3D model formats to GLB, glTF, OBJ, STL, PLY, and USDZ locally in your browser.">
-<meta name="keywords" content="meshy to glb, meshy converter, .meshy converter, Meshy AI, GLB converter, glTF converter, OBJ converter, STL converter, PLY converter, USDZ converter, 3D model converter">
-<meta name="robots" content="index,follow">
-<meta name="author" content="Amal David">
-<meta name="application-name" content="meshy2glb">
-<meta name="theme-color" content="#0f0f1a">
-<link rel="canonical" href="https://amal-david.github.io/meshy2glb/">
-<meta property="og:title" content="meshy2glb - Meshy to GLB and 3D File Converter">
-<meta property="og:description" content="Drop a .meshy, GLB, glTF, OBJ, STL, PLY, DAE, 3MF, or FBX file and export GLB, glTF, OBJ, STL, PLY, or USDZ in-browser.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://amal-david.github.io/meshy2glb/">
-<meta property="og:site_name" content="meshy2glb">
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="meshy2glb - Meshy to GLB and 3D File Converter">
-<meta name="twitter:description" content="Convert Meshy and common 3D model files locally in your browser.">
-<script type="application/ld+json">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Texture2Paint - 3D Multi-Color &amp; Palette Prep Tool</title>
+  <meta name="description"
+    content="Convert textured 3D models into multi-color 3MF files for PrusaSlicer and Bambu Studio, with color quantization, despeckle, and mesh repair.">
+  <meta name="keywords"
+    content="Texture2Paint, 3D converter, 3MF multi-color, color quantization, PrusaSlicer MMU, Bambu Studio AMS, GLB converter, 3D printing, 3D model converter">
+  <meta name="robots" content="index,follow">
+  <meta name="application-name" content="Texture2Paint">
+  <meta name="theme-color" content="#0f0f1a">
+  <link rel="canonical" href="https://EllsworOpan.github.io/Texture2Paint/">
+  <meta property="og:title" content="Texture2Paint - 3D Multi-Color &amp; 3MF Converter">
+  <meta property="og:description"
+    content="Quantize textures, clean up noise, and export native multi-color 3MF files directly in your browser.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://EllsworOpan.github.io/Texture2Paint/">
+  <meta property="og:site_name" content="Texture2Paint">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Texture2Paint - 3D Multi-Color &amp; 3MF Converter">
+  <meta name="twitter:description" content="In-browser 3D texture-to-multicolor converter and slicer prep tool.">
+  <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
-  "name": "meshy2glb",
+  "name": "Texture2Paint",
   "applicationCategory": "MultimediaApplication",
   "operatingSystem": "Any",
-  "url": "https://amal-david.github.io/meshy2glb/",
-  "description": "Browser-based converter for Meshy .meshy files and common 3D model formats.",
+  "url": "https://EllsworOpan.github.io/Texture2Paint/",
+  "description": "In-browser converter for textured 3D models into multi-color 3MF files and common 3D formats.",
   "offers": {
     "@type": "Offer",
     "price": "0",
@@ -35,642 +38,1888 @@
   }
 }
 </script>
-<style>
-  :root {
-    --bg: #0f0f1a;
-    --surface: rgba(255,255,255,.06);
-    --surface-hover: rgba(255,255,255,.1);
-    --border: rgba(255,255,255,.1);
-    --text: #e0e0e8;
-    --text-dim: #888;
-    --text-faint: #555;
-    --accent: #6c8aff;
-    --accent-hover: #8aa4ff;
-    --success: #5cd48b;
-    --warn: #ffd166;
-    --err: #ff6b6b;
-    --radius: 10px;
-    --radius-sm: 6px;
-    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
-  }
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
-               font: 13px/1.5 var(--font); -webkit-font-smoothing: antialiased; }
-  canvas { display: block; }
-  button { font: inherit; cursor: pointer; border: none; outline: none; }
-  select { font: inherit; }
-  input[type=range] { -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; }
-  input[type=range]::-webkit-slider-track { height: 3px; background: var(--border); border-radius: 2px; }
-  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px;
-    background: var(--accent); border-radius: 50%; margin-top: -5px; }
-
-  /* ── top bar ──────────────────────────────────────────────────────── */
-  #topbar {
-    position: fixed; top: 0; left: 0; right: 0; height: 48px; z-index: 20;
-    display: flex; align-items: center; padding: 0 16px; gap: 12px;
-    background: rgba(15,15,26,.85); backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--border);
-  }
-  #topbar .logo { font-size: 15px; font-weight: 700; color: #fff; letter-spacing: -.01em; }
-  #topbar .logo span { color: var(--accent); }
-  #topbar .sep { width: 1px; height: 20px; background: var(--border); }
-  #topbar .info { font-size: 12px; color: var(--text-dim); flex: 1; min-width: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #topbar .info b { color: var(--text); font-weight: 500; }
-  #topbar .info .tri { color: var(--text-faint); margin-left: 4px; }
-  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
-    color: var(--text); font-size: 12px; transition: all .15s; }
-  .btn:hover { background: var(--surface-hover); color: #fff; }
-  .btn-accent { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
-  .btn-accent:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-  .btn:disabled { opacity: .55; cursor: wait; }
-  .btn:focus-visible, .format-select:focus-visible { box-shadow: 0 0 0 2px rgba(108,138,255,.35); }
-  .btn svg { width: 14px; height: 14px; fill: currentColor; }
-  .format-select {
-    display: none; height: 31px; padding: 0 28px 0 10px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
-    color: var(--text); font-size: 12px; outline: none; cursor: pointer;
-  }
-  .format-select.show { display: inline-flex; }
-  .format-select:disabled { opacity: .55; cursor: wait; }
-  .btn-label { white-space: nowrap; }
-
-  /* ── status toast ─────────────────────────────────────────────────── */
-  #toast {
-    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 30;
-    background: rgba(15,15,26,.9); backdrop-filter: blur(12px);
-    border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 10px 18px; font-size: 13px; max-width: 500px; text-align: center;
-    transition: opacity .3s, transform .3s; pointer-events: none;
-  }
-  #toast.hidden { opacity: 0; transform: translateX(-50%) translateY(8px); }
-  #toast.ok { color: var(--success); }
-  #toast.err { color: var(--err); }
-  #toast.work { color: var(--warn); }
-
-  /* ── drop overlay ─────────────────────────────────────────────────── */
-  #drop {
-    position: fixed; inset: 0; z-index: 50;
-    background: rgba(108,138,255,.12); border: 3px dashed var(--accent);
-    display: none; align-items: center; justify-content: center;
-    font-size: 18px; color: #fff; pointer-events: none; backdrop-filter: blur(4px);
-  }
-  #drop.show { display: flex; }
-
-  /* ── empty / upload state ─────────────────────────────────────────── */
-  #empty {
-    position: fixed; inset: 48px 0 0 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 16px; text-align: center;
-  }
-  #empty.hide { display: none; }
-  #empty .upload-zone {
-    width: 360px; max-width: 90vw; padding: 48px 32px; border: 2px dashed var(--border);
-    border-radius: 16px; cursor: pointer; transition: all .2s;
-    background: var(--surface);
-  }
-  #empty .upload-zone:hover { border-color: var(--accent); background: rgba(108,138,255,.06); }
-  #empty .upload-zone svg { width: 40px; height: 40px; fill: var(--text-dim); margin-bottom: 12px; }
-  #empty .upload-zone:hover svg { fill: var(--accent); }
-  #empty .upload-zone h2 { font-size: 16px; font-weight: 500; color: var(--text); margin-bottom: 4px; }
-  #empty .upload-zone p { font-size: 12px; color: var(--text-dim); }
-  #empty .formats { font-size: 11px; color: var(--text-faint); }
-
-  /* ── controls panel ───────────────────────────────────────────────── */
-  #panel {
-    position: fixed; top: 56px; right: 8px; z-index: 15; width: 220px;
-    background: rgba(15,15,26,.88); backdrop-filter: blur(12px);
-    border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 14px; display: none; flex-direction: column; gap: 12px;
-    font-size: 12px;
-  }
-  #panel.show { display: flex; }
-  #panel h3 { font-size: 11px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: .06em; color: var(--text-dim); margin-bottom: 2px; }
-  .ctrl { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .ctrl label { color: var(--text-dim); min-width: 60px; }
-  .ctrl input[type=range] { flex: 1; }
-  .ctrl .val { width: 28px; text-align: right; color: var(--text-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
-  .ctrl-row { display: flex; gap: 6px; flex-wrap: wrap; }
-  .chip {
-    padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer;
-    background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
-    transition: all .15s;
-  }
-  .chip:hover { background: var(--surface-hover); color: var(--text); }
-  .chip.active { background: rgba(108,138,255,.15); border-color: var(--accent); color: var(--accent); }
-
-  /* ── footer ───────────────────────────────────────────────────────── */
-  #foot {
-    position: fixed; bottom: 8px; right: 12px; z-index: 5;
-    font-size: 10px; color: var(--text-faint);
-  }
-  #foot a { color: var(--text-dim); text-decoration: none; }
-  #foot a:hover { color: var(--text); }
-
-  @media (max-width: 640px) {
-    #topbar { padding: 0 8px; gap: 6px; }
-    #topbar .sep, #topbar .info { display: none; }
-    .btn { padding: 6px 10px; }
-    .btn-label { display: none; }
-    .format-select { width: 78px; padding: 0 18px 0 8px; }
-    #empty { padding: 0 18px; }
-    #empty .upload-zone { padding: 36px 22px; }
-    #empty .formats { max-width: 340px; line-height: 1.6; }
-    #panel {
-      top: auto; left: 8px; right: 8px; bottom: 8px; width: auto;
-      max-height: 42vh; overflow-y: auto; padding: 12px;
+  <style>
+    :root {
+      --bg: #0f0f1a;
+      --surface: rgba(255, 255, 255, .06);
+      --surface-hover: rgba(255, 255, 255, .1);
+      --border: rgba(255, 255, 255, .1);
+      --text: #e0e0e8;
+      --text-dim: #888;
+      --text-faint: #555;
+      --accent: #6c8aff;
+      --accent-hover: #8aa4ff;
+      --success: #5cd48b;
+      --warn: #ffd166;
+      --err: #ff6b6b;
+      --radius: 10px;
+      --radius-sm: 6px;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
     }
-    .ctrl { display: grid; grid-template-columns: 64px 1fr 28px; }
-    #toast { bottom: 16px; width: calc(100vw - 32px); }
-  }
-</style>
-<script type="importmap">
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html,
+    body {
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.5 var(--font);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    button {
+      font: inherit;
+      cursor: pointer;
+      border: none;
+      outline: none;
+    }
+
+    select {
+      font: inherit;
+    }
+
+    /* ── HIGH VISIBILITY SLIDERS ─────────────────────────────────────────── */
+    input[type=range] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 20px;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    input[type=range]::-webkit-slider-runnable-track {
+      height: 6px;
+      background: rgba(255, 255, 255, 0.25);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
+    }
+
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      background: var(--accent);
+      border: 2px solid #ffffff;
+      border-radius: 50%;
+      margin-top: -5px;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+      transition: transform 0.1s, background-color 0.1s;
+    }
+
+    input[type=range]:hover::-webkit-slider-thumb {
+      background: var(--accent-hover);
+      transform: scale(1.15);
+    }
+
+    input[type=range]::-moz-range-track {
+      height: 6px;
+      background: rgba(255, 255, 255, 0.25);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
+    }
+
+    input[type=range]::-moz-range-thumb {
+      width: 16px;
+      height: 16px;
+      background: var(--accent);
+      border: 2px solid #ffffff;
+      border-radius: 50%;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+      transition: transform 0.1s, background-color 0.1s;
+      cursor: pointer;
+    }
+
+    input[type=range]:hover::-moz-range-thumb {
+      background: var(--accent-hover);
+      transform: scale(1.15);
+    }
+
+    /* ── top bar ──────────────────────────────────────────────────────── */
+    #topbar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 48px;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      gap: 12px;
+      background: rgba(15, 15, 26, .85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    #topbar .logo {
+      font-size: 15px;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: -.01em;
+    }
+
+    #topbar .logo span {
+      color: var(--accent);
+    }
+
+    #topbar .sep {
+      width: 1px;
+      height: 20px;
+      background: var(--border);
+    }
+
+    #topbar .info {
+      font-size: 12px;
+      color: var(--text-dim);
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #topbar .info b {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    #topbar .info .tri {
+      color: var(--text-faint);
+      margin-left: 4px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-size: 12px;
+      transition: all .15s;
+    }
+
+    .btn:hover {
+      background: var(--surface-hover);
+      color: #fff;
+    }
+
+    .btn-accent {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+      font-weight: 500;
+    }
+
+    .btn-accent:hover {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+    }
+
+    .btn:disabled {
+      opacity: .55;
+      cursor: wait;
+    }
+
+    .btn:focus-visible,
+    .format-select:focus-visible {
+      box-shadow: 0 0 0 2px rgba(108, 138, 255, .35);
+    }
+
+    .btn svg {
+      width: 14px;
+      height: 14px;
+      fill: currentColor;
+    }
+
+    .format-select {
+      display: none;
+      height: 31px;
+      padding: 0 28px 0 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-size: 12px;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .format-select.show {
+      display: inline-flex;
+    }
+
+    .format-select:disabled {
+      opacity: .55;
+      cursor: wait;
+    }
+
+    .btn-label {
+      white-space: nowrap;
+    }
+
+    /* ── status toast ─────────────────────────────────────────────────── */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 30;
+      background: rgba(15, 15, 26, .9);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 18px;
+      font-size: 13px;
+      max-width: 500px;
+      text-align: center;
+      transition: opacity .3s, transform .3s;
+      pointer-events: none;
+    }
+
+    #toast.hidden {
+      opacity: 0;
+      transform: translateX(-50%) translateY(8px);
+    }
+
+    #toast.ok {
+      color: var(--success);
+    }
+
+    #toast.err {
+      color: var(--err);
+    }
+
+    #toast.work {
+      color: var(--warn);
+    }
+
+    /* ── drop overlay ─────────────────────────────────────────────────── */
+    #drop {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      background: rgba(108, 138, 255, .12);
+      border: 3px dashed var(--accent);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      color: #fff;
+      pointer-events: none;
+      backdrop-filter: blur(4px);
+    }
+
+    #drop.show {
+      display: flex;
+    }
+
+    /* ── empty / upload state ─────────────────────────────────────────── */
+    #empty {
+      position: fixed;
+      inset: 48px 0 0 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      text-align: center;
+    }
+
+    #empty.hide {
+      display: none;
+    }
+
+    #empty .upload-zone {
+      width: 360px;
+      max-width: 90vw;
+      padding: 48px 32px;
+      border: 2px dashed var(--border);
+      border-radius: 16px;
+      cursor: pointer;
+      transition: all .2s;
+      background: var(--surface);
+    }
+
+    #empty .upload-zone:hover {
+      border-color: var(--accent);
+      background: rgba(108, 138, 255, .06);
+    }
+
+    #empty .upload-zone svg {
+      width: 40px;
+      height: 40px;
+      fill: var(--text-dim);
+      margin-bottom: 12px;
+    }
+
+    #empty .upload-zone:hover svg {
+      fill: var(--accent);
+    }
+
+    #empty .upload-zone h2 {
+      font-size: 16px;
+      font-weight: 500;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    #empty .upload-zone p {
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    #empty .formats {
+      font-size: 11px;
+      color: var(--text-faint);
+    }
+
+    /* ── controls panel ───────────────────────────────────────────────── */
+    #panel {
+      position: fixed;
+      top: 56px;
+      right: 8px;
+      z-index: 15;
+      width: 220px;
+      background: rgba(15, 15, 26, .88);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+      font-size: 12px;
+    }
+
+    #panel.show {
+      display: flex;
+    }
+
+    #panel h3 {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--text-dim);
+      margin-bottom: 2px;
+    }
+
+    .ctrl {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .ctrl label {
+      color: var(--text-dim);
+      min-width: 60px;
+    }
+
+    .ctrl input[type=range] {
+      flex: 1;
+    }
+
+    .ctrl .val {
+      width: 28px;
+      text-align: right;
+      color: var(--text-faint);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .ctrl-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .chip {
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      transition: all .15s;
+    }
+
+    .chip:hover {
+      background: var(--surface-hover);
+      color: var(--text);
+    }
+
+    .chip.active {
+      background: rgba(108, 138, 255, .15);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* ── footer ───────────────────────────────────────────────────────── */
+    #foot {
+      position: fixed;
+      bottom: 8px;
+      right: 12px;
+      z-index: 5;
+      font-size: 10px;
+      color: var(--text-faint);
+    }
+
+    #foot a {
+      color: var(--text-dim);
+      text-decoration: none;
+    }
+
+    #foot a:hover {
+      color: var(--text);
+    }
+
+    /* ── processing toolbar ────────────────────────────────────── */
+    .proc-toolbar {
+      position: fixed;
+      top: 56px;
+      left: 12px;
+      z-index: 18;
+      width: 290px;
+      background: rgba(15, 15, 26, .88);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      display: none;
+      flex-direction: column;
+      gap: 14px;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, .45);
+      font-size: 12px;
+      max-height: calc(100vh - 76px);
+      overflow-y: auto;
+    }
+
+    .proc-toolbar.show {
+      display: flex;
+      animation: panelFadeIn .2s ease-out;
+    }
+
+    @keyframes panelFadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(-4px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .proc-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(255, 255, 255, .07);
+      padding-bottom: 10px;
+    }
+
+    .proc-title {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-weight: 600;
+      font-size: 13px;
+      color: #fff;
+      letter-spacing: -.01em;
+    }
+
+    .proc-icon {
+      width: 16px;
+      height: 16px;
+      fill: var(--accent);
+    }
+
+    .proc-badge {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(108, 138, 255, .15);
+      color: var(--accent);
+      letter-spacing: .04em;
+    }
+
+    .proc-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .proc-label-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .proc-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: var(--text-dim);
+    }
+
+    .proc-tag {
+      font-size: 10px;
+      color: var(--text-faint);
+    }
+
+    .proc-desc {
+      font-size: 11px;
+      color: var(--text-faint);
+      line-height: 1.4;
+    }
+
+    .select-wrapper {
+      position: relative;
+      width: 100%;
+    }
+
+    .proc-select {
+      width: 100%;
+      height: 34px;
+      padding: 0 30px 0 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-size: 12px;
+      outline: none;
+      cursor: pointer;
+      appearance: none;
+      -webkit-appearance: none;
+      transition: border-color .15s, background .15s;
+    }
+
+    .proc-select:hover {
+      background: var(--surface-hover);
+      border-color: rgba(255, 255, 255, .2);
+    }
+
+    .proc-select:focus-visible {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(108, 138, 255, .35);
+    }
+
+    .proc-select option {
+      background: #161626;
+      color: #fff;
+    }
+
+    .select-arrow {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 16px;
+      height: 16px;
+      fill: var(--text-dim);
+      pointer-events: none;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+    }
+
+    .toggle-text {
+      font-size: 12px;
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .status-badge {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+      letter-spacing: .04em;
+    }
+
+    .badge-normal {
+      background: rgba(255, 255, 255, .08);
+      color: var(--text-dim);
+    }
+
+    .badge-warn {
+      background: rgba(255, 209, 102, .2);
+      color: var(--warn);
+    }
+
+    /* switch toggle */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 36px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background-color: rgba(255, 255, 255, .15);
+      transition: .2s;
+      border-radius: 20px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 14px;
+      width: 14px;
+      left: 3px;
+      bottom: 3px;
+      background-color: #fff;
+      transition: .2s;
+      border-radius: 50%;
+    }
+
+    input:checked+.slider {
+      background-color: var(--accent);
+    }
+
+    input:checked+.slider:before {
+      transform: translateX(16px);
+    }
+
+    .btn-proc {
+      width: 100%;
+      justify-content: center;
+      height: 36px;
+      padding: 0 16px;
+      background: linear-gradient(135deg, #6c8aff 0%, #4e6beb 100%);
+      border: 1px solid #7d9aff;
+      border-radius: var(--radius-sm);
+      color: #fff;
+      font-weight: 600;
+      font-size: 12px;
+      box-shadow: 0 4px 12px rgba(108, 138, 255, .28);
+      transition: all .2s;
+    }
+
+    .btn-proc:hover {
+      background: linear-gradient(135deg, #7e9aff 0%, #5d79f2 100%);
+      box-shadow: 0 6px 16px rgba(108, 138, 255, .4);
+      transform: translateY(-1px);
+    }
+
+    .btn-proc:active {
+      transform: translateY(0);
+    }
+
+    .btn-proc:disabled {
+      opacity: .6;
+      cursor: wait;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .btn-proc svg {
+      width: 15px;
+      height: 15px;
+      fill: currentColor;
+    }
+
+    .proc-textures-section {
+      border-top: 1px solid rgba(255, 255, 255, .07);
+      padding-top: 10px;
+    }
+
+    .proc-count {
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .proc-texture-list {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      max-height: 140px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .proc-texture-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 8px;
+      background: rgba(255, 255, 255, .03);
+      border: 1px solid rgba(255, 255, 255, .05);
+      border-radius: var(--radius-sm);
+      font-size: 11px;
+    }
+
+    .proc-texture-slot {
+      font-weight: 500;
+      color: var(--text);
+    }
+
+    .proc-texture-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      color: var(--text-faint);
+    }
+
+    .proc-texture-dim {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .proc-texture-fmt {
+      text-transform: uppercase;
+      background: rgba(108, 138, 255, .12);
+      color: var(--accent);
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: 600;
+    }
+
+    .proc-texture-empty {
+      color: var(--text-faint);
+      font-style: italic;
+      padding: 4px 0;
+      font-size: 11px;
+    }
+
+    /* Dual Slider & Number Input */
+    .proc-slider-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 4px;
+    }
+
+    .proc-slider-row input[type=range] {
+      flex: 1;
+    }
+
+    .proc-num-input {
+      width: 48px;
+      height: 28px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+      outline: none;
+      -moz-appearance: textfield;
+    }
+
+    .proc-num-input::-webkit-outer-spin-button,
+    .proc-num-input::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    .proc-num-input:focus {
+      border-color: var(--accent);
+    }
+
+    /* Interactive Color Swatches */
+    .palette-swatches-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+      padding: 8px;
+      background: rgba(0, 0, 0, 0.35);
+      border-radius: var(--radius-sm);
+      min-height: 38px;
+      align-items: center;
+    }
+
+    .swatch-chip {
+      position: relative;
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+      cursor: pointer;
+      overflow: hidden;
+      transition: transform .15s, border-color .15s;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    .swatch-chip:hover {
+      transform: scale(1.18);
+      border-color: #fff;
+      z-index: 5;
+    }
+
+    .swatch-picker-input {
+      position: absolute;
+      inset: -10px;
+      width: 200%;
+      height: 200%;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    @media (max-width: 860px) {
+      .proc-toolbar {
+        top: auto;
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        width: auto;
+        max-height: 48vh;
+      }
+    }
+
+    @media (max-width: 640px) {
+      #topbar {
+        padding: 0 8px;
+        gap: 6px;
+      }
+
+      #topbar .sep,
+      #topbar .info {
+        display: none;
+      }
+
+      .btn {
+        padding: 6px 10px;
+      }
+
+      .btn-label {
+        display: none;
+      }
+
+      .format-select {
+        width: 78px;
+        padding: 0 18px 0 8px;
+      }
+
+      #empty {
+        padding: 0 18px;
+      }
+
+      #empty .upload-zone {
+        padding: 36px 22px;
+      }
+
+      #empty .formats {
+        max-width: 340px;
+        line-height: 1.6;
+      }
+
+      #panel {
+        top: auto;
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        width: auto;
+        max-height: 42vh;
+        overflow-y: auto;
+        padding: 12px;
+      }
+
+      .ctrl {
+        display: grid;
+        grid-template-columns: 64px 1fr 28px;
+      }
+
+      #toast {
+        bottom: 16px;
+        width: calc(100vw - 32px);
+      }
+    }
+  </style>
+  <script type="importmap">
 {
   "imports": {
     "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/",
+    "fflate": "https://unpkg.com/fflate@0.8.2/esm/browser.js"
   }
 }
 </script>
 </head>
+
 <body>
 
-<!-- top bar -->
-<div id="topbar">
-  <div class="logo">meshy<span>2glb</span></div>
-  <div class="sep"></div>
-  <div class="info" id="model-info">No model loaded</div>
-  <button class="btn" id="open-btn" aria-label="Open file">
-    <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-    <span class="btn-label">Open file</span>
-  </button>
-  <button class="btn" id="settings-btn" aria-label="Toggle settings">
-    <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.69-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.25-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.69 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.25 1.13-.57 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1112 8.4a3.6 3.6 0 010 7.2z"/></svg>
-  </button>
-  <select id="format-select" class="format-select" aria-label="Export format">
-    <option value="glb">GLB</option>
-    <option value="gltf">glTF</option>
-    <option value="obj">OBJ</option>
-    <option value="stl">STL</option>
-    <option value="ply">PLY</option>
-    <option value="usdz">USDZ</option>
-  </select>
-  <button class="btn btn-accent" id="download-btn" style="display:none" aria-label="Export model">
-    <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-    <span class="btn-label">Export</span>
-  </button>
-</div>
-
-<!-- controls panel -->
-<div id="panel">
-  <h3>Lighting</h3>
-  <div class="ctrl">
-    <label>Exposure</label>
-    <input type="range" id="ctrl-exposure" min="0.1" max="4" step="0.1" value="1.0">
-    <span class="val" id="val-exposure">1.0</span>
-  </div>
-  <div class="ctrl">
-    <label>Env</label>
-    <input type="range" id="ctrl-env" min="0" max="3" step="0.1" value="1.0">
-    <span class="val" id="val-env">1.0</span>
-  </div>
-  <div class="ctrl">
-    <label>Direct</label>
-    <input type="range" id="ctrl-direct" min="0" max="5" step="0.1" value="1.2">
-    <span class="val" id="val-direct">1.2</span>
-  </div>
-  <div class="ctrl">
-    <label>Ambient</label>
-    <input type="range" id="ctrl-ambient" min="0" max="3" step="0.1" value="0.6">
-    <span class="val" id="val-ambient">0.6</span>
+  <!-- top bar -->
+  <div id="topbar">
+    <div class="logo">Texture<span>2Paint</span></div>
+    <div class="sep"></div>
+    <div class="info" id="model-info">No model loaded</div>
+    <button class="btn" id="open-btn" aria-label="Open file">
+      <svg viewBox="0 0 24 24">
+        <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
+      </svg>
+      <span class="btn-label">Open file</span>
+    </button>
+    <button class="btn" id="proc-btn" aria-label="Toggle processing toolbar">
+      <svg viewBox="0 0 24 24">
+        <path
+          d="M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.28 19.58 10.59 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z" />
+      </svg>
+      <span class="btn-label">Processing</span>
+    </button>
+    <button class="btn" id="settings-btn" aria-label="Toggle settings">
+      <svg viewBox="0 0 24 24">
+        <path
+          d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.69-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.25-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.69 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.25 1.13-.57 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1112 8.4a3.6 3.6 0 010 7.2z" />
+      </svg>
+    </button>
+    <select id="format-select" class="format-select" aria-label="Export format">
+      <option value="3mf">3MF (PrusaSlicer Multi-Color)</option>
+      <option value="glb">GLB</option>
+      <option value="gltf">glTF</option>
+      <option value="obj">OBJ</option>
+      <option value="stl">STL</option>
+      <option value="ply">PLY</option>
+      <option value="usdz">USDZ</option>
+    </select>
+    <button class="btn btn-accent" id="download-btn" style="display:none" aria-label="Export model">
+      <svg viewBox="0 0 24 24">
+        <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+      </svg>
+      <span class="btn-label">Export</span>
+    </button>
   </div>
 
-  <h3>Display</h3>
-  <div class="ctrl-row">
-    <div class="chip" id="chip-wireframe">Wireframe</div>
-    <div class="chip" id="chip-rotate">Auto-rotate</div>
+  <!-- processing toolbar alongside viewport -->
+  <aside id="processing-toolbar" class="proc-toolbar" aria-label="Texture and UV processing">
+    <div class="proc-header">
+      <div class="proc-title">
+        <svg viewBox="0 0 24 24" class="proc-icon">
+          <path
+            d="M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.28 19.58 10.59 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z" />
+        </svg>
+        <span>Processing</span>
+      </div>
+      <span class="proc-badge" id="proc-model-badge">READY</span>
+    </div>
+
+    <!-- Target Texture Encoding -->
+    <div class="proc-section">
+      <div class="proc-label-row">
+        <label for="proc-texture-format" class="proc-label">Texture Encoding</label>
+        <span class="proc-tag">Target Format</span>
+      </div>
+      <div class="select-wrapper">
+        <select id="proc-texture-format" class="proc-select" aria-label="Target Texture Encoding">
+          <option value="original">None / Original (Untouched)</option>
+          <option value="png">PNG (Re-encode embedded)</option>
+          <option value="jpeg">JPEG (Re-encode embedded)</option>
+        </select>
+        <svg class="select-arrow" viewBox="0 0 24 24">
+          <path d="M7 10l5 5 5-5z" />
+        </svg>
+      </div>
+      <p class="proc-desc">Preserve source bytes or convert embedded WebP textures for maximum DCC and engine
+        compatibility.</p>
+    </div>
+
+    <!-- UV Orientation (Flip Y) -->
+    <div class="proc-section">
+      <div class="proc-label-row">
+        <span class="proc-label">UV Orientation</span>
+        <span class="status-badge badge-normal" id="uv-status-badge">NORMAL</span>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-text">Invert Vertical UV (Flip Y)</span>
+        <label class="switch" for="proc-uv-flip" aria-label="Invert Vertical UV (Flip Y)">
+          <input type="checkbox" id="proc-uv-flip">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <p class="proc-desc">Inverts V coordinates in real time for immediate visual inspection in the 3D viewport.</p>
+    </div>
+
+    <!-- Color Quantization Control -->
+    <div class="proc-section">
+      <div class="proc-label-row">
+        <span class="proc-label">Color Quantization</span>
+        <span class="status-badge badge-normal" id="quantize-badge">OFF</span>
+      </div>
+
+      <!-- Enable / Disable Switch -->
+      <div class="toggle-row" style="margin-bottom: 6px;">
+        <span class="toggle-text">Enable Color Quantization</span>
+        <label class="switch" for="proc-quantize-toggle" aria-label="Toggle Color Quantization">
+          <input type="checkbox" id="proc-quantize-toggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <!-- Linked Slider + Number Input -->
+      <div class="proc-label-row" style="margin-top: 4px;">
+        <span class="proc-tag">Filament Colors</span>
+        <button class="btn" id="proc-resample-btn" type="button"
+          style="padding: 2px 8px; font-size: 10px; height: 20px;">Resample</button>
+      </div>
+      <div class="proc-slider-row">
+        <input type="range" id="proc-colors-slider" min="2" max="24" step="1" value="5">
+        <input type="number" id="proc-colors-num" min="2" max="32" step="1" value="5" class="proc-num-input">
+      </div>
+
+      <!-- Despeckle (Min Island Size) with Linked Number Input -->
+      <div class="proc-label-row" style="margin-top: 8px;">
+        <label for="proc-despeckle-slider" class="proc-tag">Despeckle (Min Island)</label>
+        <span id="proc-despeckle-badge" style="font-size: 10px; color: var(--text-faint);">0 px (Off)</span>
+      </div>
+      <div class="proc-slider-row">
+        <input type="range" id="proc-despeckle-slider" min="0" max="500" step="10" value="0">
+        <input type="number" id="proc-despeckle-num" min="0" max="50000" step="10" value="0" class="proc-num-input"
+          style="width: 58px;">
+      </div>
+
+      <!-- Boundary Smoothing -->
+      <div class="proc-label-row" style="margin-top: 8px;">
+        <label for="proc-smooth-slider" class="proc-tag">Boundary Smoothing</label>
+        <span id="proc-smooth-badge" style="font-size: 10px; color: var(--text-faint);">Off</span>
+      </div>
+      <div class="proc-slider-row">
+        <input type="range" id="proc-smooth-slider" min="0" max="5" step="1" value="0">
+      </div>
+
+      <!-- Target Print Size -->
+      <div class="proc-label-row" style="margin-top: 8px;">
+        <label for="proc-size-num" class="proc-tag">Target Print Size</label>
+        <span style="font-size: 10px; color: var(--text-faint);">Max Dimension</span>
+      </div>
+      <div class="proc-slider-row">
+        <input type="number" id="proc-size-num" min="20" max="400" step="5" value="150" class="proc-num-input"
+          style="width: 70px;">
+        <span style="font-size: 11px; color: var(--text-dim);">mm</span>
+      </div>
+
+      <!-- Palette Swatches Strip (Interactive Picker) -->
+      <div class="proc-label-row" style="margin-top: 8px;">
+        <span class="proc-tag">Custom Palette (Click to Edit)</span>
+      </div>
+      <div class="palette-swatches-container" id="proc-swatches-strip">
+        <span style="font-size: 10px; color: var(--text-faint);">Turn switch ON to quantize colors</span>
+      </div>
+      <p class="proc-desc">Click any swatch to pick custom filament colors. Turn OFF for original texture.</p>
+    </div>
+
+    <!-- Unified Export Trigger -->
+    <div class="proc-section proc-action-section">
+      <button class="btn btn-proc" id="export-processed-btn" aria-label="Export Model">
+        <svg viewBox="0 0 24 24">
+          <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+        </svg>
+        <span>Export Model</span>
+      </button>
+    </div>
+
+    <!-- Detected Textures Summary -->
+    <div class="proc-section proc-textures-section" id="proc-textures-section">
+      <div class="proc-label-row">
+        <span class="proc-label">Detected Textures</span>
+        <span class="proc-count" id="proc-textures-count">0 maps</span>
+      </div>
+      <div class="proc-texture-list" id="proc-texture-list">
+        <div class="proc-texture-empty">No embedded textures detected</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- controls panel -->
+  <div id="panel">
+    <h3>Lighting</h3>
+    <div class="ctrl">
+      <label>Exposure</label>
+      <input type="range" id="ctrl-exposure" min="0.1" max="4" step="0.1" value="1.0">
+      <span class="val" id="val-exposure">1.0</span>
+    </div>
+    <div class="ctrl">
+      <label>Env</label>
+      <input type="range" id="ctrl-env" min="0" max="3" step="0.1" value="1.0">
+      <span class="val" id="val-env">1.0</span>
+    </div>
+    <div class="ctrl">
+      <label>Direct</label>
+      <input type="range" id="ctrl-direct" min="0" max="5" step="0.1" value="1.2">
+      <span class="val" id="val-direct">1.2</span>
+    </div>
+    <div class="ctrl">
+      <label>Ambient</label>
+      <input type="range" id="ctrl-ambient" min="0" max="3" step="0.1" value="0.6">
+      <span class="val" id="val-ambient">0.6</span>
+    </div>
+
+    <h3>Display</h3>
+    <div class="ctrl-row">
+      <div class="chip" id="chip-wireframe">Wireframe</div>
+      <div class="chip" id="chip-rotate">Auto-rotate</div>
+    </div>
+
+    <h3>Background</h3>
+    <div class="ctrl-row">
+      <div class="chip active" data-bg="#1a1a2e">Dark</div>
+      <div class="chip" data-bg="#2d2d3d">Grey</div>
+      <div class="chip" data-bg="#ffffff">White</div>
+      <div class="chip" data-bg="#000000">Black</div>
+    </div>
+
+    <button class="btn" id="reset-cam" style="width:100%;justify-content:center;margin-top:4px">Reset camera</button>
   </div>
 
-  <h3>Background</h3>
-  <div class="ctrl-row">
-    <div class="chip active" data-bg="#1a1a2e">Dark</div>
-    <div class="chip" data-bg="#2d2d3d">Grey</div>
-    <div class="chip" data-bg="#ffffff">White</div>
-    <div class="chip" data-bg="#000000">Black</div>
+  <!-- upload state -->
+  <div id="empty">
+    <div class="upload-zone" id="upload-zone">
+      <svg viewBox="0 0 24 24">
+        <path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z" />
+      </svg>
+      <h2>Drop a 3D file here</h2>
+      <p>or click to browse one or more files</p>
+    </div>
+    <div class="formats">Imports <b>.glb</b>, <b>.gltf</b>, <b>.obj</b>, <b>.stl</b>, <b>.ply</b>,
+      <b>.dae</b>, <b>.3mf</b>, <b>.fbx</b> &middot; processed locally, nothing uploaded
+    </div>
   </div>
 
-  <button class="btn" id="reset-cam" style="width:100%;justify-content:center;margin-top:4px">Reset camera</button>
-</div>
+  <!-- drop overlay -->
+  <div id="drop">Drop to convert</div>
 
-<!-- upload state -->
-<div id="empty">
-  <div class="upload-zone" id="upload-zone">
-    <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
-    <h2>Drop a 3D file here</h2>
-    <p>or click to browse one or more files</p>
+  <!-- toast -->
+  <div id="toast" class="hidden"></div>
+
+  <!-- file input -->
+  <input id="picker" type="file" accept=".meshy,.glb,.gltf,.obj,.stl,.ply,.dae,.3mf,.fbx" multiple hidden>
+
+  <!-- footer -->
+  <div id="foot">
+    <a href="https://github.com/EllsworOpan/Texture2Paint" target="_blank" rel="noopener">github</a>
   </div>
-  <div class="formats">Imports <b>.meshy</b>, <b>.glb</b>, <b>.gltf</b>, <b>.obj</b>, <b>.stl</b>, <b>.ply</b>, <b>.dae</b>, <b>.3mf</b>, <b>.fbx</b> &middot; processed locally, nothing uploaded</div>
-</div>
 
-<!-- drop overlay -->
-<div id="drop">Drop to convert</div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { meshyToGlb, isMeshyFile, isGlbFile } from './src/decrypt.js';
+    import { decompressGlb } from './src/decompress.js';
+    import { Viewer } from './src/viewer.js';
+    import {
+      applyUvFlip,
+      applyLiveColorQuantization,
+      exportMultiColor3MF,
+      exportProcessedGlb,
+      linkGlbOriginalTextures,
+      getModelTextures
+    } from './src/processor.js';
+    import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+    import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+    import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+    import { ColladaLoader } from 'three/addons/loaders/ColladaLoader.js';
+    import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
+    import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+    import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+    import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
+    import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+    import { PLYExporter } from 'three/addons/exporters/PLYExporter.js';
+    import { USDZExporter } from 'three/addons/exporters/USDZExporter.js';
 
-<!-- toast -->
-<div id="toast" class="hidden"></div>
+    const $ = id => document.getElementById(id);
+    const $toast = $('toast');
+    const $drop = $('drop');
+    const $empty = $('empty');
+    const $picker = $('picker');
+    const $info = $('model-info');
+    const $panel = $('panel');
+    const $dlBtn = $('download-btn');
+    const $format = $('format-select');
+    const $procToolbar = $('processing-toolbar');
+    const $procBtn = $('proc-btn');
+    const $procFormat = $('proc-texture-format');
+    const $procUvFlip = $('proc-uv-flip');
+    const $uvBadge = $('uv-status-badge');
+    const $exportProcBtn = $('export-processed-btn');
+    const $procBadge = $('proc-model-badge');
+    const $textureList = $('proc-texture-list');
+    const $textureCount = $('proc-textures-count');
+    const $quantizeToggle = $('proc-quantize-toggle');
+    const $quantizeBadge = $('quantize-badge');
+    const $colorsSlider = $('proc-colors-slider');
+    const $colorsNum = $('proc-colors-num');
+    const $swatchesStrip = $('proc-swatches-strip');
+    const $despeckleSlider = $('proc-despeckle-slider');
+    const $despeckleBadge = $('proc-despeckle-badge');
+    const $despeckleNum = $('proc-despeckle-num');
+    const $smoothSlider = $('proc-smooth-slider');
+    const $smoothBadge = $('proc-smooth-badge');
+    const $resampleBtn = $('proc-resample-btn');
 
-<!-- file input -->
-<input id="picker" type="file" accept=".meshy,.glb,.gltf,.obj,.stl,.ply,.dae,.3mf,.fbx" multiple hidden>
+    let toastTimer;
+    function toast(msg, cls = 'work', duration = 0) {
+      $toast.className = cls;
+      $toast.textContent = msg;
+      clearTimeout(toastTimer);
+      if (duration > 0) toastTimer = setTimeout(() => $toast.classList.add('hidden'), duration);
+    }
 
-<!-- footer -->
-<div id="foot">
-  <a href="https://github.com/Amal-David/meshy2glb" target="_blank" rel="noopener">github</a>
-</div>
+    const viewer = new Viewer();
+    let lastBaseName = '';
+    let lastSourceGlbBuffer = null;
+    let lastResourceUrls = [];
+    let activePalette = [];
 
-<script type="module">
-import { meshyToGlb, isMeshyFile, isGlbFile } from './src/decrypt.js';
-import { decompressGlb } from './src/decompress.js';
-import { Viewer } from './src/viewer.js';
-import * as THREE from 'three';
-import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
-import { STLLoader } from 'three/addons/loaders/STLLoader.js';
-import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
-import { ColladaLoader } from 'three/addons/loaders/ColladaLoader.js';
-import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
-import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
-import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
-import { STLExporter } from 'three/addons/exporters/STLExporter.js';
-import { PLYExporter } from 'three/addons/exporters/PLYExporter.js';
-import { USDZExporter } from 'three/addons/exporters/USDZExporter.js';
+    const IMPORT_FORMATS = new Set(['meshy', 'glb', 'gltf', 'obj', 'stl', 'ply', 'dae', '3mf', 'fbx']);
+    const IMPORT_FORMAT_LABEL = '.meshy, .glb, .gltf, .obj, .stl, .ply, .dae, .3mf, or .fbx';
 
-const $ = id => document.getElementById(id);
-const $toast    = $('toast');
-const $drop     = $('drop');
-const $empty    = $('empty');
-const $picker   = $('picker');
-const $info     = $('model-info');
-const $panel    = $('panel');
-const $dlBtn    = $('download-btn');
-const $format   = $('format-select');
+    function extensionFor(name) {
+      return name.toLowerCase().split('.').pop() || '';
+    }
 
-let toastTimer;
-function toast(msg, cls = 'work', duration = 0) {
-  $toast.className = cls;
-  $toast.textContent = msg;
-  clearTimeout(toastTimer);
-  if (duration > 0) toastTimer = setTimeout(() => $toast.classList.add('hidden'), duration);
-}
+    function baseNameFor(name) {
+      return name.replace(/\.[^.]+$/u, '');
+    }
 
-const viewer = new Viewer();
-let lastBaseName = '';
-let lastSourceGlbBuffer = null;
-let lastResourceUrls = [];
+    function revokeUrls(urls) {
+      for (const url of new Set(urls)) URL.revokeObjectURL(url);
+    }
 
-const IMPORT_FORMATS = new Set(['meshy', 'glb', 'gltf', 'obj', 'stl', 'ply', 'dae', '3mf', 'fbx']);
-const IMPORT_FORMAT_LABEL = '.meshy, .glb, .gltf, .obj, .stl, .ply, .dae, .3mf, or .fbx';
+    function createResourceManager(files) {
+      const manager = new THREE.LoadingManager();
+      const urls = [];
+      const byName = new Map();
 
-function extensionFor(name) {
-  return name.toLowerCase().split('.').pop() || '';
-}
+      for (const file of files) {
+        const url = URL.createObjectURL(file);
+        urls.push(url);
+        const names = [
+          file.name,
+          `./${file.name}`,
+          encodeURI(file.name),
+          `./${encodeURI(file.name)}`,
+        ];
+        for (const name of names) byName.set(name, url);
+      }
 
-function baseNameFor(name) {
-  return name.replace(/\.[^.]+$/u, '');
-}
+      manager.setURLModifier(url => {
+        const clean = decodeURIComponent(url.split(/[?#]/)[0]);
+        const basename = clean.split('/').pop();
+        return byName.get(clean) || byName.get(clean.replace(/^\.\//u, '')) || byName.get(basename) || url;
+      });
 
-function revokeUrls(urls) {
-  for (const url of new Set(urls)) URL.revokeObjectURL(url);
-}
+      return { manager, urls };
+    }
 
-function createResourceManager(files) {
-  const manager = new THREE.LoadingManager();
-  const urls = [];
-  const byName = new Map();
+    function parseGltfData(data, manager) {
+      return new Promise((resolve, reject) => {
+        const loader = new GLTFLoader(manager);
+        loader.setMeshoptDecoder(MeshoptDecoder);
+        loader.parse(data, '', gltf => resolve(gltf), reject);
+      });
+    }
 
-  for (const file of files) {
-    const url = URL.createObjectURL(file);
-    urls.push(url);
-    const names = [
-      file.name,
-      `./${file.name}`,
-      encodeURI(file.name),
-      `./${encodeURI(file.name)}`,
-    ];
-    for (const name of names) byName.set(name, url);
-  }
+    function meshFromGeometry(geometry) {
+      if (!geometry.attributes.normal) geometry.computeVertexNormals();
+      const material = new THREE.MeshStandardMaterial({ color: 0xe7e9f2, roughness: 0.65, metalness: 0.02 });
+      return new THREE.Mesh(geometry, material);
+    }
 
-  manager.setURLModifier(url => {
-    const clean = decodeURIComponent(url.split(/[?#]/)[0]);
-    const basename = clean.split('/').pop();
-    return byName.get(clean) || byName.get(clean.replace(/^\.\//u, '')) || byName.get(basename) || url;
-  });
+    function assertHasMesh(object) {
+      let hasMesh = false;
+      object.traverse(child => { if (child.isMesh && child.geometry) hasMesh = true; });
+      if (!hasMesh) throw new Error('No renderable mesh found in this file');
+      return object;
+    }
 
-  return { manager, urls };
-}
+    async function loadObjectFromFile(file, manager) {
+      const buffer = await file.arrayBuffer();
+      const ext = extensionFor(file.name);
+      const sizeMb = (buffer.byteLength / 1024 / 1024).toFixed(2);
 
-function parseGltfData(data, manager) {
-  return new Promise((resolve, reject) => {
-    const loader = new GLTFLoader(manager);
-    loader.setMeshoptDecoder(MeshoptDecoder);
-    loader.parse(data, '', gltf => resolve(gltf.scene), reject);
-  });
-}
+      if (isGlbFile(buffer)) {
+        toast(`Loading ${file.name} (${sizeMb} MB)…`);
+        const gltf = await parseGltfData(buffer, manager);
+        linkGlbOriginalTextures(gltf.scene, gltf.parser, buffer);
+        return {
+          object: assertHasMesh(gltf.scene),
+          sourceFormat: 'glb',
+          sourceGlbBuffer: buffer,
+          sizeBytes: buffer.byteLength,
+        };
+      }
 
-function meshFromGeometry(geometry) {
-  if (!geometry.attributes.normal) geometry.computeVertexNormals();
-  const material = new THREE.MeshStandardMaterial({ color: 0xe7e9f2, roughness: 0.65, metalness: 0.02 });
-  return new THREE.Mesh(geometry, material);
-}
+      if (isMeshyFile(buffer)) {
+        toast(`Decrypting ${file.name} (${sizeMb} MB)…`);
+        const intermediate = await meshyToGlb(buffer);
+        toast('Decompressing mesh data…');
+        const glb = await decompressGlb(intermediate, MeshoptDecoder);
+        const gltf = await parseGltfData(glb, manager);
+        linkGlbOriginalTextures(gltf.scene, gltf.parser, glb);
+        return {
+          object: assertHasMesh(gltf.scene),
+          sourceFormat: 'meshy',
+          sourceGlbBuffer: glb,
+          sizeBytes: glb.byteLength,
+        };
+      }
 
-function assertHasMesh(object) {
-  let hasMesh = false;
-  object.traverse(child => { if (child.isMesh && child.geometry) hasMesh = true; });
-  if (!hasMesh) throw new Error('No renderable mesh found in this file');
-  return object;
-}
+      if (ext === 'glb') throw new Error('Invalid GLB file');
+      if (ext === 'meshy') throw new Error('Invalid .meshy file');
+      if (!IMPORT_FORMATS.has(ext)) throw new Error(`Unsupported file type. Try ${IMPORT_FORMAT_LABEL}.`);
 
-async function loadObjectFromFile(file, manager) {
-  const buffer = await file.arrayBuffer();
-  const ext = extensionFor(file.name);
-  const sizeMb = (buffer.byteLength / 1024 / 1024).toFixed(2);
+      toast(`Loading ${file.name} (${sizeMb} MB)…`);
 
-  if (isGlbFile(buffer)) {
-    toast(`Loading ${file.name} (${sizeMb} MB)…`);
-    return {
-      object: assertHasMesh(await parseGltfData(buffer, manager)),
-      sourceFormat: 'glb',
-      sourceGlbBuffer: buffer,
-      sizeBytes: buffer.byteLength,
-    };
-  }
+      if (ext === 'gltf') {
+        const text = new TextDecoder().decode(buffer);
+        const gltf = await parseGltfData(text, manager);
+        return {
+          object: assertHasMesh(gltf.scene),
+          sourceFormat: ext,
+          sizeBytes: buffer.byteLength,
+        };
+      }
 
-  if (isMeshyFile(buffer)) {
-    toast(`Decrypting ${file.name} (${sizeMb} MB)…`);
-    const intermediate = await meshyToGlb(buffer);
-    toast('Decompressing mesh data…');
-    const glb = await decompressGlb(intermediate, MeshoptDecoder);
-    return {
-      object: assertHasMesh(await parseGltfData(glb, manager)),
-      sourceFormat: 'meshy',
-      sourceGlbBuffer: glb,
-      sizeBytes: glb.byteLength,
-    };
-  }
+      if (ext === 'obj') {
+        const text = new TextDecoder().decode(buffer);
+        return {
+          object: assertHasMesh(new OBJLoader(manager).parse(text)),
+          sourceFormat: ext,
+          sizeBytes: buffer.byteLength,
+        };
+      }
 
-  if (ext === 'glb') throw new Error('Invalid GLB file');
-  if (ext === 'meshy') throw new Error('Invalid .meshy file');
-  if (!IMPORT_FORMATS.has(ext)) throw new Error(`Unsupported file type. Try ${IMPORT_FORMAT_LABEL}.`);
+      if (ext === 'stl') {
+        const geometry = new STLLoader(manager).parse(buffer);
+        return {
+          object: meshFromGeometry(geometry),
+          sourceFormat: ext,
+          sizeBytes: buffer.byteLength,
+        };
+      }
 
-  toast(`Loading ${file.name} (${sizeMb} MB)…`);
+      if (ext === 'ply') {
+        const geometry = new PLYLoader(manager).parse(buffer);
+        return {
+          object: meshFromGeometry(geometry),
+          sourceFormat: ext,
+          sizeBytes: buffer.byteLength,
+        };
+      }
 
-  if (ext === 'gltf') {
-    const text = new TextDecoder().decode(buffer);
-    return {
-      object: assertHasMesh(await parseGltfData(text, manager)),
-      sourceFormat: ext,
-      sizeBytes: buffer.byteLength,
-    };
-  }
+      if (ext === 'dae') {
+        const text = new TextDecoder().decode(buffer);
+        return {
+          object: assertHasMesh(new ColladaLoader(manager).parse(text, '').scene),
+          sourceFormat: ext,
+          sizeBytes: buffer.byteLength,
+        };
+      }
 
-  if (ext === 'obj') {
-    const text = new TextDecoder().decode(buffer);
-    return {
-      object: assertHasMesh(new OBJLoader(manager).parse(text)),
-      sourceFormat: ext,
-      sizeBytes: buffer.byteLength,
-    };
-  }
+      if (ext === '3mf') {
+        return {
+          object: assertHasMesh(new ThreeMFLoader(manager).parse(buffer)),
+          sourceFormat: ext,
+          sizeBytes: buffer.byteLength,
+        };
+      }
 
-  if (ext === 'stl') {
-    const geometry = new STLLoader(manager).parse(buffer);
-    return {
-      object: meshFromGeometry(geometry),
-      sourceFormat: ext,
-      sizeBytes: buffer.byteLength,
-    };
-  }
+      if (ext === 'fbx') {
+        return {
+          object: assertHasMesh(new FBXLoader(manager).parse(buffer, '')),
+          sourceFormat: ext,
+          sizeBytes: buffer.byteLength,
+        };
+      }
 
-  if (ext === 'ply') {
-    const geometry = new PLYLoader(manager).parse(buffer);
-    return {
-      object: meshFromGeometry(geometry),
-      sourceFormat: ext,
-      sizeBytes: buffer.byteLength,
-    };
-  }
+      throw new Error(`Unsupported file type. Try ${IMPORT_FORMAT_LABEL}.`);
+    }
 
-  if (ext === 'dae') {
-    const text = new TextDecoder().decode(buffer);
-    return {
-      object: assertHasMesh(new ColladaLoader(manager).parse(text, '').scene),
-      sourceFormat: ext,
-      sizeBytes: buffer.byteLength,
-    };
-  }
+    function updateTextureListUI() {
+      const textures = viewer.getTextures();
+      $textureCount.textContent = `${textures.length} map${textures.length === 1 ? '' : 's'}`;
+      $textureList.innerHTML = '';
+      if (textures.length === 0) {
+        $textureList.innerHTML = '<div class="proc-texture-empty">No embedded textures detected</div>';
+        return;
+      }
+      for (const t of textures) {
+        const item = document.createElement('div');
+        item.className = 'proc-texture-item';
+        const cleanMime = (t.mimeType || 'embedded').replace('image/', '');
+        item.innerHTML = `
+      <span class="proc-texture-slot">${t.slot}</span>
+      <div class="proc-texture-meta">
+        <span class="proc-texture-dim">${t.width ? `${t.width}×${t.height}` : 'active'}</span>
+        <span class="proc-texture-fmt">${cleanMime}</span>
+      </div>
+    `;
+        $textureList.appendChild(item);
+      }
+    }
 
-  if (ext === '3mf') {
-    return {
-      object: assertHasMesh(new ThreeMFLoader(manager).parse(buffer)),
-      sourceFormat: ext,
-      sizeBytes: buffer.byteLength,
-    };
-  }
+    async function handleFiles(fileList) {
+      const files = Array.from(fileList);
+      const primary = files.find(file => IMPORT_FORMATS.has(extensionFor(file.name)));
+      if (!primary) throw new Error(`No supported 3D file found. Try ${IMPORT_FORMAT_LABEL}.`);
 
-  if (ext === 'fbx') {
-    return {
-      object: assertHasMesh(new FBXLoader(manager).parse(buffer, '')),
-      sourceFormat: ext,
-      sizeBytes: buffer.byteLength,
-    };
-  }
+      $empty.classList.add('hide');
+      lastBaseName = baseNameFor(primary.name);
+      const resources = createResourceManager(files);
 
-  throw new Error(`Unsupported file type. Try ${IMPORT_FORMAT_LABEL}.`);
-}
+      try {
+        const loaded = await loadObjectFromFile(primary, resources.manager);
+        const { triangles } = viewer.loadObject(loaded.object);
+        revokeUrls(lastResourceUrls);
+        lastResourceUrls = resources.urls;
+        lastSourceGlbBuffer = loaded.sourceGlbBuffer ?? null;
+        const sizeMb = (loaded.sizeBytes / 1024 / 1024).toFixed(2);
+        $info.innerHTML = `<b>${lastBaseName}</b> &mdash; ${loaded.sourceFormat.toUpperCase()} &middot; ${sizeMb} MB &middot; ${triangles.toLocaleString()} triangles`;
 
-async function handleFiles(fileList) {
-  const files = Array.from(fileList);
-  const primary = files.find(file => IMPORT_FORMATS.has(extensionFor(file.name)));
-  if (!primary) throw new Error(`No supported 3D file found. Try ${IMPORT_FORMAT_LABEL}.`);
+        $procUvFlip.checked = false;
+        $uvBadge.textContent = 'NORMAL';
+        $uvBadge.className = 'status-badge badge-normal';
+        $procBadge.textContent = loaded.sourceFormat.toUpperCase();
+        updateTextureListUI();
+        $procToolbar.classList.add('show');
 
-  $empty.classList.add('hide');
-  lastBaseName = baseNameFor(primary.name);
-  const resources = createResourceManager(files);
+        // Initialize palette and swatches immediately on file load
+        activePalette = [];
+        updateQuantization(false);
+      } catch (err) {
+        revokeUrls(resources.urls);
+        throw err;
+      }
 
-  try {
-    const loaded = await loadObjectFromFile(primary, resources.manager);
-    const { triangles } = viewer.loadObject(loaded.object);
-    revokeUrls(lastResourceUrls);
-    lastResourceUrls = resources.urls;
-    lastSourceGlbBuffer = loaded.sourceGlbBuffer ?? null;
-    const sizeMb = (loaded.sizeBytes / 1024 / 1024).toFixed(2);
-    $info.innerHTML = `<b>${lastBaseName}</b> &mdash; ${loaded.sourceFormat.toUpperCase()} &middot; ${sizeMb} MB &middot; ${triangles.toLocaleString()} triangles`;
-  } catch (err) {
-    revokeUrls(resources.urls);
-    throw err;
-  }
+      $format.classList.add('show');
+      $dlBtn.style.display = '';
+      $panel.classList.add('show');
+      toast('Ready', 'ok', 2000);
+    }
 
-  $format.classList.add('show');
-  $dlBtn.style.display = '';
-  $panel.classList.add('show');
-  toast('Ready', 'ok', 2000);
-}
+    async function loadFiles(files) {
+      try {
+        await handleFiles(files);
+      } catch (err) {
+        toast(err.message, 'err', 5000);
+        console.error(err);
+      }
+    }
 
-async function loadFiles(files) {
-  try {
-    await handleFiles(files);
-  } catch (err) {
-    toast(err.message, 'err', 5000);
-    console.error(err);
-  }
-}
+    function pickFile() { $picker.click(); }
 
-function pickFile() { $picker.click(); }
+    // ── export ────────────────────────────────────────────────────────────
 
-// ── export ────────────────────────────────────────────────────────────
-function saveDownload(data, filename, type) {
-  const blob = data instanceof Blob ? data : new Blob([data], { type });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}
+    async function promptAndSave(filename, type, generateDataFn) {
+      let fileHandle = null;
+      const ext = filename.split('.').pop().toLowerCase() || 'glb';
 
-function parseGltf(root, { binary }) {
-  return new Promise((resolve, reject) => {
-    new GLTFExporter().parse(
-      root,
-      result => resolve(result instanceof ArrayBuffer ? result : JSON.stringify(result, null, 2)),
-      reject,
-      { binary, onlyVisible: true },
-    );
-  });
-}
+      if (typeof window.showSaveFilePicker === 'function' && window.isSecureContext) {
+        try {
+          fileHandle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: [{
+              description: '3D Model File',
+              accept: { 'application/octet-stream': [`.${ext}`] }
+            }]
+          });
+        } catch (err) {
+          if (err.name === 'AbortError') {
+            toast('Export cancelled', 'work', 1500);
+            return false;
+          }
+          console.warn('showSaveFilePicker failed or unavailable, falling back to browser download:', err);
+        }
+      }
 
-async function exportPayload(format) {
-  if (!viewer.currentModel) throw new Error('No model loaded');
+      toast(`Exporting ${filename}…`);
+      const rawData = await generateDataFn();
+      const blob = rawData instanceof Blob ? rawData : new Blob([rawData], { type: type || 'application/octet-stream' });
 
-  if (format === 'glb') {
-    return {
-      data: lastSourceGlbBuffer ?? await parseGltf(viewer.currentModel, { binary: true }),
-      extension: 'glb',
-      type: 'model/gltf-binary',
-    };
-  }
+      if (fileHandle) {
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
 
-  if (format === 'gltf') {
-    return {
-      data: await parseGltf(viewer.currentModel, { binary: false }),
-      extension: 'gltf',
-      type: 'model/gltf+json',
-    };
-  }
+        const evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+        a.dispatchEvent(evt);
 
-  if (format === 'obj') {
-    return {
-      data: new OBJExporter().parse(viewer.currentModel),
-      extension: 'obj',
-      type: 'text/plain',
-    };
-  }
+        setTimeout(() => {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, 4000);
+      }
+      return true;
+    }
 
-  if (format === 'stl') {
-    return {
-      data: new STLExporter().parse(viewer.currentModel, { binary: true }),
-      extension: 'stl',
-      type: 'model/stl',
-    };
-  }
+    function parseGltf(root, { binary }) {
+      return new Promise((resolve, reject) => {
+        new GLTFExporter().parse(
+          root,
+          result => resolve(result instanceof ArrayBuffer ? result : JSON.stringify(result, null, 2)),
+          reject,
+          { binary, onlyVisible: true },
+        );
+      });
+    }
 
-  if (format === 'ply') {
-    return {
-      data: new PLYExporter().parse(viewer.currentModel, { binary: false }),
-      extension: 'ply',
-      type: 'text/plain',
-    };
-  }
+    async function exportPayload(format) {
+      if (!viewer.currentModel) throw new Error('No model loaded');
 
-  if (format === 'usdz') {
-    return {
-      data: await new USDZExporter().parseAsync(viewer.currentModel, { maxTextureSize: 2048 }),
-      extension: 'usdz',
-      type: 'model/vnd.usdz+zip',
-    };
-  }
+      if (format === '3mf') {
+        const isEnabled = $quantizeToggle.checked;
+        const numColors = parseInt($colorsNum.value || '5', 10);
+        const targetSizeMm = parseFloat($('proc-size-num')?.value || '150');
+        const isUvFlipped = viewer.isUvFlipped();
+        const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
+        const smoothLevel = parseInt($smoothSlider.value || '0', 10);
 
-  throw new Error(`Unsupported export format: ${format}`);
-}
+        const data = await exportMultiColor3MF(
+          viewer.currentModel,
+          numColors,
+          isEnabled,
+          targetSizeMm,
+          isUvFlipped,
+          activePalette,
+          despeckleSize,
+          smoothLevel
+        );
+        return {
+          data,
+          extension: '3mf',
+          type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml',
+        };
+      }
 
-$dlBtn.addEventListener('click', async () => {
-  const format = $format.value;
-  try {
-    $dlBtn.disabled = true;
-    $format.disabled = true;
-    toast(`Exporting .${format}…`);
-    const payload = await exportPayload(format);
-    saveDownload(payload.data, `${lastBaseName}.${payload.extension}`, payload.type);
-    toast(`Exported .${payload.extension}`, 'ok', 2000);
-  } catch (err) {
-    toast(err.message, 'err', 5000);
-    console.error(err);
-  } finally {
-    $dlBtn.disabled = false;
-    $format.disabled = false;
-  }
-});
+      if (format === 'glb') {
+        const data = await exportProcessedGlb(viewer.currentModel, { GLTFExporter });
+        return { data, extension: 'glb', type: 'application/octet-stream' };
+      }
 
-// ── drag-and-drop ─────────────────────────────────────────────────────
-addEventListener('dragover', e => { e.preventDefault(); $drop.classList.add('show'); });
-addEventListener('dragleave', e => { if (e.target === document.body) $drop.classList.remove('show'); });
-addEventListener('drop', e => {
-  e.preventDefault();
-  $drop.classList.remove('show');
-  if (e.dataTransfer.files.length > 0) loadFiles(e.dataTransfer.files);
-});
+      if (format === 'gltf') {
+        return {
+          data: await parseGltf(viewer.currentModel, { binary: false }),
+          extension: 'gltf',
+          type: 'model/gltf+json',
+        };
+      }
 
-// ── click-to-pick ─────────────────────────────────────────────────────
-$('upload-zone').addEventListener('click', pickFile);
-$('open-btn').addEventListener('click', pickFile);
-$picker.addEventListener('change', () => {
-  if ($picker.files?.length) loadFiles($picker.files);
-  $picker.value = '';
-});
+      if (format === 'obj') {
+        return {
+          data: new OBJExporter().parse(viewer.currentModel),
+          extension: 'obj',
+          type: 'text/plain',
+        };
+      }
 
-// ── settings toggle ───────────────────────────────────────────────────
-$('settings-btn').addEventListener('click', () => $panel.classList.toggle('show'));
+      if (format === 'stl') {
+        return {
+          data: new STLExporter().parse(viewer.currentModel, { binary: true }),
+          extension: 'stl',
+          type: 'application/octet-stream',
+        };
+      }
 
-// ── sliders ───────────────────────────────────────────────────────────
-function bindSlider(id, setter) {
-  const el = $(id);
-  const val = $('val-' + id.replace('ctrl-', ''));
-  el.addEventListener('input', () => { setter(+el.value); if (val) val.textContent = (+el.value).toFixed(1); });
-}
-bindSlider('ctrl-exposure', v => viewer.setExposure(v));
-bindSlider('ctrl-env',      v => viewer.setEnvIntensity(v));
-bindSlider('ctrl-direct',   v => viewer.setDirectLight(v));
-bindSlider('ctrl-ambient',  v => viewer.setAmbientLight(v));
+      if (format === 'ply') {
+        return {
+          data: new PLYExporter().parse(viewer.currentModel, { binary: false }),
+          extension: 'ply',
+          type: 'text/plain',
+        };
+      }
 
-// ── chips ─────────────────────────────────────────────────────────────
-$('chip-wireframe').addEventListener('click', function() {
-  this.classList.toggle('active');
-  viewer.setWireframe(this.classList.contains('active'));
-});
-$('chip-rotate').addEventListener('click', function() {
-  this.classList.toggle('active');
-  viewer.setAutoRotate(this.classList.contains('active'));
-});
-document.querySelectorAll('[data-bg]').forEach(chip => {
-  chip.addEventListener('click', () => {
-    document.querySelectorAll('[data-bg]').forEach(c => c.classList.remove('active'));
-    chip.classList.add('active');
-    viewer.setBackground(chip.dataset.bg);
-  });
-});
-$('reset-cam').addEventListener('click', () => viewer.resetCamera());
-</script>
+      if (format === 'usdz') {
+        return {
+          data: await new USDZExporter().parseAsync(viewer.currentModel, { maxTextureSize: 2048 }),
+          extension: 'usdz',
+          type: 'model/vnd.usdz+zip',
+        };
+      }
+
+      throw new Error(`Unsupported export format: ${format}`);
+    }
+
+    // Render interactive palette chips with color pickers
+    function renderSwatches(palette) {
+      $swatchesStrip.innerHTML = '';
+      if (!palette || palette.length === 0) {
+        $swatchesStrip.innerHTML = '<span style="font-size: 10px; color: var(--text-faint);">Load a model to view palette</span>';
+        return;
+      }
+
+      palette.forEach((c, idx) => {
+        const hex = '#' + c.map(v => v.toString(16).padStart(2, '0')).join('');
+
+        const label = document.createElement('label');
+        label.className = 'swatch-chip';
+        label.style.backgroundColor = hex;
+        label.title = `Color ${idx + 1}: ${hex.toUpperCase()} (Click to eyedrop/edit)`;
+
+        const picker = document.createElement('input');
+        picker.type = 'color';
+        picker.value = hex;
+        picker.className = 'swatch-picker-input';
+
+        // When user picks a custom color or uses eyedropper:
+        picker.addEventListener('input', e => {
+          const newHex = e.target.value;
+          label.style.backgroundColor = newHex;
+          label.title = `Color ${idx + 1}: ${newHex.toUpperCase()} (Click to eyedrop/edit)`;
+
+          const r = parseInt(newHex.slice(1, 3), 16);
+          const g = parseInt(newHex.slice(3, 5), 16);
+          const b = parseInt(newHex.slice(5, 7), 16);
+          activePalette[idx] = [r, g, b];
+
+          const enabled = $quantizeToggle.checked;
+          const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
+          const smoothLevel = parseInt($smoothSlider.value || '0', 10);
+
+          // Update palette in memory; if enabled, update viewport in real time
+          applyLiveColorQuantization(
+            viewer.currentModel,
+            activePalette.length,
+            enabled,
+            activePalette,
+            despeckleSize,
+            smoothLevel
+          );
+        });
+
+        label.appendChild(picker);
+        $swatchesStrip.appendChild(label);
+      });
+    }
+
+    let quantizeTimer;
+    function updateQuantization(forceResample = false) {
+      clearTimeout(quantizeTimer);
+      quantizeTimer = setTimeout(() => {
+        const enabled = $quantizeToggle.checked;
+        const numColors = parseInt($colorsNum.value || '5', 10);
+        const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
+        const smoothLevel = parseInt($smoothSlider.value || '0', 10);
+
+        $quantizeBadge.textContent = enabled ? `${numColors} COLORS` : 'OFF';
+        $quantizeBadge.className = 'status-badge ' + (enabled ? 'badge-warn' : 'badge-normal');
+
+        $despeckleBadge.textContent = despeckleSize === 0 ? '0 px (Off)' : `${despeckleSize} px`;
+        $smoothBadge.textContent = smoothLevel === 0 ? 'Off' : `Level ${smoothLevel}`;
+
+        // If explicitly forcing a resample, wipe local activePalette
+        if (forceResample) activePalette = [];
+
+        activePalette = applyLiveColorQuantization(
+          viewer.currentModel,
+          numColors,
+          enabled,
+          (!forceResample && activePalette.length > 0) ? activePalette : null,
+          despeckleSize,
+          smoothLevel,
+          forceResample
+        );
+        renderSwatches(activePalette);
+      }, 30);
+    }
+
+    // Dedicated Resample button: FORCES a brand-new K-Means sample
+    $resampleBtn.addEventListener('click', () => {
+      updateQuantization(true);
+      toast('Resampled palette from model', 'ok', 1500);
+    });
+
+    // Sync slider -> number box (DOES NOT reset custom colors)
+    $colorsSlider.addEventListener('input', e => {
+      $colorsNum.value = e.target.value;
+      updateQuantization(false); // false keeps your existing picks!
+    });
+
+    // Sync number box -> slider (DOES NOT reset custom colors)
+    $colorsNum.addEventListener('input', e => {
+      let val = parseInt(e.target.value, 10);
+      if (isNaN(val) || val < 2) val = 2;
+      if (val > 32) val = 32;
+      $colorsSlider.value = Math.min(val, 24);
+      updateQuantization(false); // false keeps your existing picks!
+    });
+
+    // Sync Despeckle slider -> number box
+    $despeckleSlider.addEventListener('input', e => {
+      $despeckleNum.value = e.target.value;
+      const v = parseInt(e.target.value || '0', 10);
+      $despeckleBadge.textContent = v === 0 ? '0 px (Off)' : `${v} px`;
+      if ($quantizeToggle.checked) updateQuantization(false);
+    });
+
+    // Sync Despeckle number box -> slider (supports values beyond slider max)
+    $despeckleNum.addEventListener('input', e => {
+      let val = parseInt(e.target.value, 10);
+      if (isNaN(val) || val < 0) val = 0;
+      $despeckleSlider.value = Math.min(val, 500);
+      $despeckleBadge.textContent = val === 0 ? '0 px (Off)' : `${val} px`;
+      if ($quantizeToggle.checked) updateQuantization(false);
+    });
+
+    // Boundary Smoothing slider
+    $smoothSlider.addEventListener('input', () => {
+      if ($quantizeToggle.checked) updateQuantization(false);
+      else {
+        const v = parseInt($smoothSlider.value || '0', 10);
+        $smoothBadge.textContent = v === 0 ? 'Off' : `Level ${v}`;
+      }
+    });
+
+    // Toggle preview on/off
+    $quantizeToggle.addEventListener('change', () => {
+      updateQuantization(false);
+    });
+
+    // UV Orientation toggle listener
+    $procUvFlip.addEventListener('change', e => {
+      const flipped = e.target.checked;
+      viewer.setUvFlipped(flipped);
+      applyUvFlip(viewer.currentModel, flipped);
+      $uvBadge.textContent = flipped ? 'FLIPPED' : 'NORMAL';
+      $uvBadge.className = 'status-badge ' + (flipped ? 'badge-warn' : 'badge-normal');
+      toast(flipped ? 'Inverted Vertical UV (Flip Y)' : 'Standard Vertical UV', 'ok', 1500);
+
+      if ($quantizeToggle.checked) {
+        updateQuantization(false);
+      }
+    });
+
+    // Main download button
+    $dlBtn.addEventListener('click', async () => {
+      const format = $format.value;
+      const filename = `${lastBaseName || 'model'}.${format}`;
+      const type = 'application/octet-stream';
+
+      try {
+        $dlBtn.disabled = true;
+        $format.disabled = true;
+
+        const completed = await promptAndSave(filename, type, async () => {
+          const payload = await exportPayload(format);
+          return payload.data;
+        });
+
+        if (completed) {
+          toast(`Exported ${filename}`, 'ok', 2000);
+        }
+      } catch (err) {
+        toast(err.message, 'err', 5000);
+        console.error(err);
+      } finally {
+        $dlBtn.disabled = false;
+        $format.disabled = false;
+      }
+    });
+
+    // Processing toolbar toggle
+    $procBtn.addEventListener('click', () => $procToolbar.classList.toggle('show'));
+
+    $procFormat.addEventListener('change', e => {
+      const val = e.target.value;
+      const label = val === 'original' ? 'None / Original (Untouched)' : val.toUpperCase();
+      toast(`Target texture format: ${label}`, 'ok', 1500);
+    });
+
+    // Both export buttons trigger the unified exporter
+    $exportProcBtn.addEventListener('click', () => {
+      $dlBtn.click();
+    });
+
+    // ── drag-and-drop ─────────────────────────────────────────────────────
+    addEventListener('dragover', e => { e.preventDefault(); $drop.classList.add('show'); });
+    addEventListener('dragleave', e => { if (e.target === document.body) $drop.classList.remove('show'); });
+    addEventListener('drop', e => {
+      e.preventDefault();
+      $drop.classList.remove('show');
+      if (e.dataTransfer.files.length > 0) loadFiles(e.dataTransfer.files);
+    });
+
+    // ── click-to-pick ─────────────────────────────────────────────────────
+    $('upload-zone').addEventListener('click', pickFile);
+    $('open-btn').addEventListener('click', pickFile);
+    $picker.addEventListener('change', () => {
+      if ($picker.files?.length) loadFiles($picker.files);
+      $picker.value = '';
+    });
+
+    // ── settings toggle ───────────────────────────────────────────────────
+    $('settings-btn').addEventListener('click', () => $panel.classList.toggle('show'));
+
+    // ── sliders ───────────────────────────────────────────────────────────
+    function bindSlider(id, setter) {
+      const el = $(id);
+      const val = $('val-' + id.replace('ctrl-', ''));
+      el.addEventListener('input', () => { setter(+el.value); if (val) val.textContent = (+el.value).toFixed(1); });
+    }
+    bindSlider('ctrl-exposure', v => viewer.setExposure(v));
+    bindSlider('ctrl-env', v => viewer.setEnvIntensity(v));
+    bindSlider('ctrl-direct', v => viewer.setDirectLight(v));
+    bindSlider('ctrl-ambient', v => viewer.setAmbientLight(v));
+
+    // ── chips ─────────────────────────────────────────────────────────────
+    $('chip-wireframe').addEventListener('click', function () {
+      this.classList.toggle('active');
+      viewer.setWireframe(this.classList.contains('active'));
+    });
+    $('chip-rotate').addEventListener('click', function () {
+      this.classList.toggle('active');
+      viewer.setAutoRotate(this.classList.contains('active'));
+    });
+    document.querySelectorAll('[data-bg]').forEach(chip => {
+      chip.addEventListener('click', () => {
+        document.querySelectorAll('[data-bg]').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        viewer.setBackground(chip.dataset.bg);
+      });
+    });
+    $('reset-cam').addEventListener('click', () => viewer.resetCamera());
+  </script>
 
 </body>
+
 </html>

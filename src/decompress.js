@@ -35,7 +35,7 @@ export async function decompressGlb(glbBuffer, MeshoptDecoder) {
       newBufferViews.push({
         buffer: 0,
         byteOffset: decodedTotal,
-        byteLength: bv.byteLength,
+        byteLength: outSize, // <-- FIXED: Use the actual decoded size
         ...(bv.byteStride ? { byteStride: bv.byteStride } : {}),
         ...(bv.target ? { target: bv.target } : {}),
       });

@@ -1,0 +1,11 @@
+services:
+  meshy2glb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meshy2glb
+    ports:
+      - "8080:80"
+    volumes:
+      - ./:/usr/share/nginx/html:ro
+    restart: unless-stopped

@@ -1,123 +1,115 @@
-# meshy2glb
+# Texture2Paint
 
-Browser-based converter and viewer for [meshy.ai](https://meshy.ai)'s
-`.meshy` 3D model files and common 3D formats. Drop files in, preview
-with adjustable lighting, then export as `.glb`, `.gltf`, `.obj`,
-`.stl`, `.ply`, or `.usdz`.
+Browser-based 3D model converter, texture-to-palette quantizer, and multi-color 3D printing prep tool. Drop in any textured 3D model, simplify its texture into discrete filament colors with live 3D preview, clean up noise and boundaries, and export directly as a multi-color **`.3mf`** for **PrusaSlicer**, **Bambu Studio**, and **OrcaSlicer**—or convert between common 3D formats.
 
-**Live:** https://amal-david.github.io/meshy2glb/
+**Live Demo:** `https://EllsworOpan.github.io/Texture2Paint/`
 
-Everything runs client-side — decryption, meshopt decompression, and
-rendering all happen in your browser. No file ever leaves your machine.
+Everything runs **100% client-side** in your browser. No files are ever uploaded to a server.
 
-## How it works
+---
 
-`.meshy` files are AES-256-CTR encrypted glTF/GLB containers with
-meshopt-compressed vertex data. The decoder was built clean-room
-through reverse engineering (no meshy code or WASM in the bundle):
+## What is Texture2Paint?
 
-1. **Decrypt** — the first 8 KB of the body is AES-256-CTR encrypted
-   with a fixed 32-byte ASCII key and a per-file nonce from the header.
-   A 16-byte GCM auth tag follows. Everything after is plaintext.
-2. **Decompress** — the decrypted GLB uses `EXT_meshopt_compression`.
-   We run [meshoptimizer](https://github.com/zeux/meshoptimizer)'s JS
-   decoder on every compressed bufferView to produce a standard GLB
-   with raw vertex/index data.
-3. **Render / convert** — three.js loads the model into a shared scene.
-   The viewer provides orbit controls, adjustable lighting, wireframe
-   mode, background presets, and auto-rotate. Exporters serialize that
-   scene into the chosen output format.
+Textured 3D models (from 3D scanners, photogrammetry, game assets, or digital sculpts) often feature continuous gradients and millions of blended colors. Prepping these models for multi-material FDM 3D printing (Bambu AMS, Prusa MMU/Core One, toolchangers) usually requires tedious manual triangle-painting or destructive mesh conversions that crack along UV seams.
 
-The full pipeline (decrypt → decompress → render) takes ~80 ms for a
-5 MB model.
+**Texture2Paint** bridges this gap right in your browser:
+1. **Flattens complex textures** into a custom palette of solid filament colors (e.g. 2 to 32 colors) with zero dithering.
+2. **Cleans up noise** using configurable island despeckling and edge boundary smoothing.
+3. **Exports directly to Slicer-Native `.3mf`**: Welds UV seams into a sealed, watertight manifold solid and embeds native MMU/AMS color segmentation attributes directly onto the mesh.
+
+---
 
 ## Features
 
-- **Drag-and-drop or click to upload** — accepts `.meshy`, `.glb`,
-  `.gltf`, `.obj`, `.stl`, `.ply`, `.dae`, `.3mf`, and `.fbx`
-- **Lighting controls** — exposure, environment intensity, direct
-  light, ambient light (all real-time sliders)
-- **Display options** — wireframe toggle, auto-rotate, background
-  presets (dark / grey / white / black), camera reset
-- **Multi-format export** — download a standard `.glb`, `.gltf`,
-  `.obj`, `.stl`, `.ply`, or `.usdz` for Blender, Unity, Unreal,
-  slicers, AR preview, and other model tools
-- **Linked asset support** — when loading `.gltf` files, select the
-  `.bin` and texture files alongside the main file so relative asset
-  references can resolve locally
-- Works on any static host — GitHub Pages, Cloudflare Pages, S3,
-  localhost
+### 🎨 Color Quantization & Custom Palette Tools
+- **Adjustable Palette Size:** Use the slider or enter any exact number of colors (e.g., 2, 4, 7, 9, 12).
+- **Real-Time 3D Viewport Preview:** Quantization is accelerated by an in-memory 5-bit 3D Color LUT for smooth, interactive 60 FPS slider adjustments.
+- **Interactive Swatch Editor & Eyedropper:** Click any color chip to open a color picker. Toggle quantization off to inspect the original texture and use your browser's eyedropper tool to sample colors directly from the 3D model.
+- **Persistent Memory:** Toggling quantization on/off or expanding/trimming the color count preserves your custom color choices without resetting your work.
+- **Dedicated Resample Button:** Re-run K-Means clustering only when you explicitly want a fresh, randomized palette from the model.
 
-## Run locally
+### 🧹 Texture & Contour Cleanup
+- **Despeckle (Min Island Filter):** Connected-component filter that removes stray dots and color speckles smaller than your chosen pixel threshold (e.g. 50–500 px), merging them into surrounding colors to eliminate wasteful filament purge switches.
+- **Boundary Smoothing:** Majority mode filter that smooths stair-stepped, pixelated color borders into clean contours and rounds out circular features (like eyes).
+- **UV Orientation Control:** Lossless vertical UV inversion (`V = 1.0 - V`) toggle with live viewport updates.
 
+### 🖨️ Slicer-Ready Multi-Material 3MF Export
+- **Native AMS & MMU Segmentation:** Writes `<m:colorgroup>`, `slic3rpe:mmu_segmentation`, and `paint_color` attributes directly onto the mesh.
+- **Watertight Manifold Topology (Zero Cracks):** Samples colors with original UVs first, then welds coincident vertices along UV seams into shared indices. Eliminates the non-manifold open-edge errors common with multi-body converters.
+- **Z-Up Print Bed Alignment:** Automatically transforms models from Y-Up (web) to Z-Up (slicers) and grounds the lowest point flat to the build plate at $Z = 0$.
+- **Configurable Scale:** Normalizes the model to your desired build size (default 150 mm) so it loads into your slicer at **100% scale** with no scaling warnings.
+
+### 🌐 Universal 3D Viewer & Multi-Format Converter
+- **Wide Import Support:** Accepts `.glb`, `.gltf`, `.obj`, `.stl`, `.ply`, `.dae`, `.3mf`, and `.fbx`.
+- **Multi-Format Export:** Export your model as `.3mf` (Multi-Material), `.glb` (with embedded quantized or original textures), `.gltf`, `.obj`, `.stl`, `.ply`, or `.usdz`.
+- **Interactive Viewport:** Orbit controls, exposure, environment intensity, ambient/directional lighting controls, wireframe mode, and dark/grey/white/black background presets.
+
+---
+
+## Supported Formats
+
+| Format | Import | Export | Notes |
+| :--- | :---: | :---: | :--- |
+| **3MF** | ✅ | ✅ | Multi-material assembly with native Prusa/Bambu paint data |
+| **GLB** | ✅ | ✅ | Binary glTF; embeds quantized canvas texture when enabled |
+| **glTF** | ✅ | ✅ | JSON glTF with external buffer/image support |
+| **OBJ** | ✅ | ✅ | Wavefront OBJ with material and vertex coordinate export |
+| **STL** | ✅ | ✅ | Binary STL for standard single-color slicing |
+| **PLY** | ✅ | ✅ | Polygon file format |
+| **USDZ** | ❌ | ✅ | Apple AR / iOS QuickLook format |
+| **FBX** | ✅ | ❌ | Autodesk FBX import |
+| **DAE** | ✅ | ❌ | Collada format import |
+
+---
+
+## Quick Start (Local Setup)
+
+Because Texture2Paint runs entirely on client-side web technologies (Three.js, WebGL, Web APIs, and fflate), it can be hosted using any static web server:
+
+### Option 1: Python HTTP Server
 ```bash
-git clone https://github.com/Amal-David/meshy2glb
-cd meshy2glb
+git clone https://github.com/<your-username>/Texture2Paint.git
+cd Texture2Paint
 ./start.sh
+# Or manually:
+python3 -m http.server 8765
 ```
+Open `http://localhost:8765` in your browser.
 
-## Tests
-
+### Option 2: Docker
 ```bash
-node --test tests/decrypt.test.mjs
+docker compose up --build
 ```
+Open `http://localhost:8080` in your browser.
 
-Tests cover format detection, AES-CTR decryption, meshopt decode
-integrity (zero corrupted indices), and GLB structural validation.
-Fixture-driven cases run on any `.meshy` files in `tests/fixtures/`
-or `$MESHY_FIXTURES`.
+---
 
-## File format (reverse-engineered)
+## Typical Slicer Workflow
 
-```
-Offset          Contents
-────────────    ────────────────────────────────────────────────
-0..7            magic "MESHY.AI"
-8..9            version (uint16 LE, observed: 1)
-10..21          12-byte AES nonce
-22..31          reserved
-32..8224        AES-256-CTR ciphertext (always 8192 bytes)
-8224..8240      16-byte AES-GCM authentication tag
-8240..EOF       plaintext (WebP textures + meshopt streams)
-```
+1. **Import:** Drag and drop your 3D model (`.glb`, `.obj`, `.fbx`, etc.) into the viewport.
+2. **Quantize:** Open the **Processing** sidebar, switch **Enable Color Quantization** to **ON**, and set your desired number of filament colors (e.g. `4`).
+3. **Customize Palette (Optional):**
+   * Click any color swatch to pick exact filament colors or enter hex values.
+   * Or, turn quantization **OFF**, click a swatch, select the eyedropper tool, and sample colors directly from the original model in the 3D viewport. Turn quantization back **ON** to apply.
+4. **Clean Up:**
+   * Adjust **Despeckle** (e.g., `40–120 px`) to remove stray color dots and speckles.
+   * Adjust **Boundary Smoothing** (e.g., `Level 2`) to round circular features like eyes and sharpen shell margins.
+5. **Set Size:** Enter your desired **Target Print Size** (e.g., `150` mm).
+6. **Export:** Set the top bar export dropdown to **`3MF (PrusaSlicer Multi-Color)`** and click **Export**.
+7. **Slice:** Drop the `.3mf` into **PrusaSlicer**, **Bambu Studio**, or **OrcaSlicer**. The model will load onto the bed standing upright, at 100% scale, with zero non-manifold cracks and all colors assigned to separate filament slots.
 
-Cipher: AES-256-CTR, key = `JSON{"accessors":[{"bufferView":` (literal
-ASCII), counter = `nonce || uint32be(2)`.
+---
 
-The encrypted 8 KB contains the GLB header, glTF JSON, BIN chunk
-header, and the start of the first buffer view. Everything after the
-16-byte tag is stored in the clear — textures (WebP) and meshopt-
-compressed vertex/index streams.
+## Attribution & Credits
 
-Full reverse-engineering notes (including dead ends) are in
-[NOTES.md](./NOTES.md).
+Texture2Paint is a fork of the 3D browser viewer foundation developed by [Amal David](https://github.com/Amal-David) (`meshy2glb`). This project expands that foundation into a dedicated 3D printing preparation tool, introducing K-Means color quantization, interactive custom palette editing, connected-component despeckling, majority-mode contour smoothing, UV transform baking, and native multi-material 3MF compilation.
 
-## Architecture
+### Third-Party Libraries
+- [three.js](https://threejs.org/) — 3D scene graph, WebGL rendering, and format exporters (MIT)
+- [fflate](https://github.com/101arrowz/fflate) — High-performance client-side ZIP/3MF packaging (MIT)
+- [meshoptimizer](https://github.com/zeux/meshoptimizer) — Geometry decompression support (MIT)
 
-```
-src/
-  decrypt.js      AES-256-CTR decryption via WebCrypto (~50 LOC)
-  decompress.js   meshopt decompression → standard GLB (~100 LOC)
-  viewer.js       three.js renderer with controls
-index.html        UI: upload, controls panel, top bar, import/export routing
-tests/
-  decrypt.test.mjs    node:test suite
-  meshopt_decoder.module.js   vendored decoder for offline tests
-```
-
-## Credits
-
-- [zeux/meshoptimizer](https://github.com/zeux/meshoptimizer) — the
-  mesh compression library (MIT)
-- [three.js](https://threejs.org/) — 3D rendering (MIT)
-- [youssef02/meshy2glb](https://github.com/youssef02/meshy2glb) —
-  original Tampermonkey approach
-- [Pouare514/meshy-downloader](https://github.com/Pouare514/meshy-downloader)
-  — Chrome extension with similar in-page intercept
-
-## Disclaimer
-
-Not affiliated with [meshy.ai](https://meshy.ai).
+---
 
 ## License
 
