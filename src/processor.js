@@ -1033,7 +1033,7 @@ export async function exportMultiColor3MF(
   // 3MF paint is per-face, so this is the physical sampling resolution of the
   // baked paint mesh. A 0.25 mm default is below a typical 0.4 mm nozzle while
   // keeping the file much smaller than a triangle-per-texture-pixel export.
-  const paintStepMm = Math.max(0.1, Math.min(2.0, Number(paintResolutionMm) || 0.25));
+  const paintStepMm = Math.max(0.01, Math.min(2.0, Number(paintResolutionMm) || 0.25));
   const MIN_SPLIT_EDGE_LEN_SQ = paintStepMm * paintStepMm;
   let largestInitialEdge = paintStepMm;
   for (const tri of initialTriangles) {
@@ -1046,8 +1046,8 @@ export async function exportMultiColor3MF(
   }
   // Derive the required depth from the requested print resolution instead of
   // silently capping every model at four midpoint splits.
-  const MAX_REFINEMENT_PASSES = Math.min(11, Math.max(1, Math.ceil(Math.log2(largestInitialEdge / paintStepMm))));
-  const MAX_OUTPUT_TRIANGLES = 750000;
+  const MAX_REFINEMENT_PASSES = Math.min(15, Math.max(1, Math.ceil(Math.log2(largestInitialEdge / paintStepMm))));
+  const MAX_OUTPUT_TRIANGLES = 1000000;
   let refinementLimited = false;
 
   for (let pass = 0; pass < MAX_REFINEMENT_PASSES; pass++) {
