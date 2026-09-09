@@ -1136,6 +1136,30 @@
       <p class="proc-desc">Inverts V coordinates in real time for immediate visual inspection in the 3D viewport.</p>
     </div>
 
+    <!-- Decals & Alpha Cutout -->
+    <div class="proc-section">
+      <div class="proc-label-row">
+        <span class="proc-label">Decals &amp; Alpha Cutout</span>
+        <span class="status-badge badge-active" id="alpha-status-badge">CUTOUT (0.5)</span>
+      </div>
+      <div class="toggle-row" style="margin-bottom: 6px;">
+        <span class="toggle-text">Cutout Transparent Decals</span>
+        <label class="switch" for="proc-alpha-toggle" aria-label="Cutout Transparent Decals">
+          <input type="checkbox" id="proc-alpha-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="proc-label-row" style="margin-top: 4px;">
+        <label for="proc-alpha-slider" class="proc-tag">Cutout Threshold</label>
+        <span id="proc-alpha-badge" style="font-size: 10px; color: var(--text-faint);">0.50</span>
+      </div>
+      <div class="proc-slider-row">
+        <input type="range" id="proc-alpha-slider" min="0.01" max="0.99" step="0.05" value="0.5">
+      </div>
+      <p class="proc-desc">Discards transparent quad backgrounds for overlayed decals (eyes, mouth, eyebrows) on
+        character faces.</p>
+    </div>
+
     <!-- Mesh Repair & Sealing (Welding, Disjoint Mesh Healing, Hole Closing) -->
     <div class="proc-section">
       <div class="proc-label-row">
@@ -1269,6 +1293,18 @@
           style="width: 70px;">
         <span style="font-size: 11px; color: var(--text-dim);">mm</span>
       </div>
+
+      <!-- Physical sampling resolution for the triangle-only Prusa paint format -->
+      <div class="proc-label-row" style="margin-top: 8px;">
+        <label for="proc-paint-resolution" class="proc-tag">Paint Detail</label>
+        <span style="font-size: 10px; color: var(--text-faint);">Surface resolution</span>
+      </div>
+      <div class="proc-slider-row">
+        <input type="number" id="proc-paint-resolution" min="0.10" max="2.00" step="0.05" value="0.25" class="proc-num-input"
+          style="width: 70px;">
+        <span style="font-size: 11px; color: var(--text-dim);">mm</span>
+      </div>
+      <p class="proc-desc">Smaller values preserve smoother projected texture edges, but increase 3MF size and export time.</p>
 
       <!-- Palette Swatches Strip (Interactive Picker) -->
       <div class="proc-label-row" style="margin-top: 8px;">
@@ -1418,6 +1454,10 @@
     const $procFormat = $('proc-texture-format');
     const $procUvFlip = $('proc-uv-flip');
     const $uvBadge = $('uv-status-badge');
+    const $procAlphaToggle = $('proc-alpha-toggle');
+    const $procAlphaSlider = $('proc-alpha-slider');
+    const $alphaBadge = $('alpha-status-badge');
+    const $alphaSliderBadge = $('proc-alpha-badge');
     const $procRepairToggle = $('proc-repair-toggle');
     const $procCloseHoles = $('proc-close-holes');
     const $procJoinSubmeshes = $('proc-join-submeshes');
@@ -1487,25 +1527,54 @@
       const manager = new THREE.LoadingManager();
       const urls = [];
       const byName = new Map();
+      const byNameLower = new Map();
 
       for (const file of files) {
         const url = URL.createObjectURL(file);
         urls.push(url);
 
-        // Store by clean filename, relative path, and encoded path
-        const baseName = file.name.split('/').pop();
-        byName.set(file.name, url);
-        byName.set(`./${file.name}`, url);
-        byName.set(baseName, url);
-        byName.set(`./${baseName}`, url);
-        byName.set(`textures/${baseName}`, url);
-        byName.set(`./textures/${baseName}`, url);
+        const cleanName = (file.name || '').replace(/\\/g, '/');
+        const baseName = cleanName.split('/').pop() || '';
+        const relPath = (file.relativePath ? file.relativePath : cleanName).replace(/\\/g, '/');
+        const relBase = relPath.split('/').pop() || '';
+
+        const aliases = [
+          cleanName,
+          `./${cleanName}`,
+          baseName,
+          `./${baseName}`,
+          `textures/${baseName}`,
+          `./textures/${baseName}`,
+          relPath,
+          `./${relPath}`,
+          relBase,
+          `./${relBase}`,
+          `textures/${relBase}`,
+          `./textures/${relBase}`
+        ];
+
+        for (const alias of aliases) {
+          if (!alias) continue;
+          byName.set(alias, url);
+          byNameLower.set(alias.toLowerCase(), url);
+        }
       }
 
       manager.setURLModifier(url => {
-        const clean = decodeURIComponent(url.split(/[?#]/)[0]);
+        const clean = decodeURIComponent(url.split(/[?#]/)[0]).replace(/\\/g, '/');
+        const cleanWithoutDot = clean.replace(/^\.\//u, '');
         const base = clean.split('/').pop();
-        return byName.get(clean) || byName.get(clean.replace(/^\.\//u, '')) || byName.get(base) || url;
+        const baseWithoutDot = base ? base.replace(/^\.\//u, '') : '';
+
+        return byName.get(clean) ||
+          byName.get(cleanWithoutDot) ||
+          byName.get(base) ||
+          byName.get(baseWithoutDot) ||
+          byNameLower.get(clean.toLowerCase()) ||
+          byNameLower.get(cleanWithoutDot.toLowerCase()) ||
+          byNameLower.get(base ? base.toLowerCase() : '') ||
+          byNameLower.get(baseWithoutDot ? baseWithoutDot.toLowerCase() : '') ||
+          url;
       });
 
       return { manager, urls };
@@ -1585,11 +1654,35 @@
         const objLoader = new OBJLoader(manager);
 
         // Check if there is an .mtl file in the uploaded files or zip
-        const mtlFile = files.find(f => extensionFor(f.name) === 'mtl');
+        const mtllibMatch = text.match(/^\s*mtllib\s+(.+)$/im);
+        const targetMtlName = mtllibMatch ? mtllibMatch[1].trim().split(/[\\/]/).pop().toLowerCase() : null;
+        const baseMtlName = (baseNameFor(file.name) + '.mtl').toLowerCase();
+
+        let mtlFile = null;
+        if (targetMtlName) {
+          mtlFile = files.find(f => f.name.toLowerCase() === targetMtlName || (f.relativePath && f.relativePath.toLowerCase().endsWith(targetMtlName)));
+        }
+        if (!mtlFile) {
+          mtlFile = files.find(f => f.name.toLowerCase() === baseMtlName);
+        }
+        if (!mtlFile) {
+          mtlFile = files.find(f => extensionFor(f.name) === 'mtl');
+        }
+
         if (mtlFile) {
           const mtlText = new TextDecoder().decode(await mtlFile.arrayBuffer());
           const materials = new MTLLoader(manager).parse(mtlText, '');
           materials.preload();
+          for (const mat of Object.values(materials.materials)) {
+            if (mat) {
+              mat.alphaTest = 0.5;
+              mat.depthWrite = true;
+              mat.polygonOffset = true;
+              mat.polygonOffsetFactor = -1;
+              mat.polygonOffsetUnits = -1;
+              mat.side = THREE.DoubleSide;
+            }
+          }
           objLoader.setMaterials(materials);
         }
 
@@ -1687,20 +1780,50 @@
           const mime = fileName.endsWith('.png') ? 'image/png'
             : fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') ? 'image/jpeg'
               : 'application/octet-stream';
-          extractedFiles.push(new File([data], fileName, { type: mime }));
+          const file = new File([data], fileName, { type: mime });
+          file.relativePath = relativePath;
+          extractedFiles.push(file);
         }
         files = extractedFiles;
       }
 
-      const primary = files.find(file => IMPORT_FORMATS.has(extensionFor(file.name)) && extensionFor(file.name) !== 'zip');
-      if (!primary) throw new Error(`No supported 3D file found inside. Try ${IMPORT_FORMAT_LABEL}.`);
+      const modelFiles = files.filter(file => IMPORT_FORMATS.has(extensionFor(file.name)) && extensionFor(file.name) !== 'zip');
+      if (modelFiles.length === 0) throw new Error(`No supported 3D file found inside. Try ${IMPORT_FORMAT_LABEL}.`);
 
+      const primary = modelFiles[0];
       $empty.classList.add('hide');
       lastBaseName = baseNameFor(primary.name);
       const resources = createResourceManager(files);
 
       try {
-        const loaded = await loadObjectFromFile(primary, resources.manager, files);
+        let loaded;
+        if (modelFiles.length > 1) {
+          toast(`Loading ${modelFiles.length} sub-models from archive…`);
+          const group = new THREE.Group();
+          let totalBytes = 0;
+          let loadedCount = 0;
+          for (const mf of modelFiles) {
+            try {
+              const sub = await loadObjectFromFile(mf, resources.manager, files);
+              group.add(sub.object);
+              totalBytes += sub.sizeBytes;
+              loadedCount++;
+            } catch (err) {
+              console.warn(`Could not load sub-model ${mf.name}:`, err);
+            }
+          }
+          if (loadedCount === 0) {
+            throw new Error('Could not parse any 3D models from this archive');
+          }
+          loaded = {
+            object: assertHasMesh(group),
+            sourceFormat: extensionFor(primary.name),
+            sizeBytes: totalBytes,
+          };
+        } else {
+          loaded = await loadObjectFromFile(primary, resources.manager, files);
+        }
+
         canonicalizeModel(loaded.object);
         const { triangles } = viewer.loadObject(loaded.object);
         revokeUrls(lastResourceUrls);
@@ -1713,6 +1836,11 @@
         $procUvFlip.checked = false;
         $uvBadge.textContent = 'NORMAL';
         $uvBadge.className = 'status-badge badge-normal';
+        $procAlphaToggle.checked = true;
+        $procAlphaSlider.value = '0.5';
+        $alphaBadge.textContent = 'CUTOUT (0.5)';
+        $alphaBadge.className = 'status-badge badge-active';
+        $alphaSliderBadge.textContent = '0.50';
         $procBadge.textContent = lastLoadedFormat;
         updateTextureListUI();
         $procToolbar.classList.add('show');
@@ -1817,6 +1945,7 @@
         const isEnabled = $quantizeToggle.checked;
         const numColors = parseInt($colorsNum.value || '5', 10);
         const targetSizeMm = parseFloat($('proc-size-num')?.value || '150');
+        const paintResolutionMm = parseFloat($('proc-paint-resolution')?.value || '0.25');
         const isUvFlipped = viewer.isUvFlipped();
         const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
         const smoothLevel = parseInt($smoothSlider.value || '0', 10);
@@ -1829,8 +1958,13 @@
           isUvFlipped,
           activePalette,
           despeckleSize,
-          smoothLevel
+          smoothLevel,
+          paintResolutionMm
         );
+        const bake = viewer.currentModel._lastPaintBake;
+        if (bake?.refinementLimited) {
+          toast(`Paint bake reached its ${bake.triangleCount.toLocaleString()}-triangle safety limit; use a larger Paint Detail value for a complete bake.`, 'work', 5000);
+        }
         return {
           data,
           extension: '3mf',
@@ -2032,6 +2166,26 @@
 
       if ($quantizeToggle.checked) {
         updateQuantization(false);
+      }
+    });
+
+    // Decals & Alpha Cutout listeners
+    $procAlphaToggle.addEventListener('change', e => {
+      const enabled = e.target.checked;
+      viewer.setAlphaCutout(enabled);
+      const testVal = parseFloat($procAlphaSlider.value || '0.5');
+      $alphaBadge.textContent = enabled ? `CUTOUT (${testVal.toFixed(1)})` : 'OFF';
+      $alphaBadge.className = 'status-badge ' + (enabled ? 'badge-active' : 'badge-normal');
+      toast(enabled ? `Decal cutout enabled (${testVal.toFixed(2)})` : 'Decal cutout disabled', 'ok', 1500);
+    });
+
+    $procAlphaSlider.addEventListener('input', e => {
+      const val = parseFloat(e.target.value);
+      $alphaSliderBadge.textContent = val.toFixed(2);
+      if ($procAlphaToggle.checked) {
+        viewer.setAlphaTest(val);
+        $alphaBadge.textContent = `CUTOUT (${val.toFixed(1)})`;
+        $alphaBadge.className = 'status-badge badge-active';
       }
     });
 

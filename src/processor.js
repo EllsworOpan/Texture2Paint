@@ -56,33 +56,61 @@ export function applyUvFlip(rootObject, invert = false) {
  */
 function bakeUvTransforms(mesh) {
   if (!mesh.geometry || !mesh.material) return;
-  const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-  const map = mat.map;
-  if (!map) return;
-
+  const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
   const uvAttr = mesh.geometry.attributes.uv;
   if (!uvAttr) return;
 
-  const offset = map.offset || new THREE.Vector2(0, 0);
-  const repeat = map.repeat || new THREE.Vector2(1, 1);
-  const rotation = map.rotation || 0;
-  const center = map.center || new THREE.Vector2(0, 0);
-
-  if (offset.x !== 0 || offset.y !== 0 || repeat.x !== 1 || repeat.y !== 1 || rotation !== 0) {
-    const cos = Math.cos(rotation);
-    const sin = Math.sin(rotation);
-
-    for (let i = 0; i < uvAttr.count; i++) {
-      let u = uvAttr.getX(i) - center.x;
-      let v = uvAttr.getY(i) - center.y;
-      const ru = u * cos - v * sin;
-      const rv = u * sin + v * cos;
-      uvAttr.setXY(i, ru * repeat.x + center.x + offset.x, rv * repeat.y + center.y + offset.y);
+  const groups = mesh.geometry.groups;
+  if (groups && groups.length > 0 && materials.length > 1) {
+    const idx = mesh.geometry.index;
+    for (const grp of groups) {
+      const mat = materials[grp.materialIndex];
+      const map = mat?.map;
+      if (!map) continue;
+      const offset = map.offset || new THREE.Vector2(0, 0);
+      const repeat = map.repeat || new THREE.Vector2(1, 1);
+      const rotation = map.rotation || 0;
+      const center = map.center || new THREE.Vector2(0, 0);
+      if (offset.x !== 0 || offset.y !== 0 || repeat.x !== 1 || repeat.y !== 1 || rotation !== 0) {
+        const cos = Math.cos(rotation);
+        const sin = Math.sin(rotation);
+        for (let i = grp.start; i < grp.start + grp.count; i++) {
+          const vi = idx ? idx.getX(i) : i;
+          let u = uvAttr.getX(vi) - center.x;
+          let v = uvAttr.getY(vi) - center.y;
+          const ru = u * cos - v * sin;
+          const rv = u * sin + v * cos;
+          uvAttr.setXY(vi, ru * repeat.x + center.x + offset.x, rv * repeat.y + center.y + offset.y);
+        }
+        uvAttr.needsUpdate = true;
+        map.offset.set(0, 0);
+        map.repeat.set(1, 1);
+        map.rotation = 0;
+      }
     }
-    uvAttr.needsUpdate = true;
-    map.offset.set(0, 0);
-    map.repeat.set(1, 1);
-    map.rotation = 0;
+  } else {
+    const mat = materials[0];
+    const map = mat?.map;
+    if (!map) return;
+    const offset = map.offset || new THREE.Vector2(0, 0);
+    const repeat = map.repeat || new THREE.Vector2(1, 1);
+    const rotation = map.rotation || 0;
+    const center = map.center || new THREE.Vector2(0, 0);
+    if (offset.x !== 0 || offset.y !== 0 || repeat.x !== 1 || repeat.y !== 1 || rotation !== 0) {
+      const cos = Math.cos(rotation);
+      const sin = Math.sin(rotation);
+      for (let i = 0; i < uvAttr.count; i++) {
+        let u = uvAttr.getX(i) - center.x;
+        let v = uvAttr.getY(i) - center.y;
+        const ru = u * cos - v * sin;
+        const rv = u * sin + v * cos;
+        uvAttr.setXY(i, ru * repeat.x + center.x + offset.x, rv * repeat.y + center.y + offset.y);
+      }
+      uvAttr.needsUpdate = true;
+      map.offset.set(0, 0);
+      map.repeat.set(1, 1);
+      map.rotation = 0;
+    }
   }
 }
 
@@ -250,23 +278,22 @@ export function canonicalizeModel(rootObject) {
   if (materials.length <= 1) {
     finalMaterial = materials[0] || new THREE.MeshStandardMaterial({ color: 0xe7e9f2, roughness: 0.65 });
   } else {
-    // Check if all materials actually share the exact same texture and color
-    const firstMat = materials[0];
-    const allIdentical = materials.every(mat => {
-      if (!mat || !firstMat) return false;
-      if (mat === firstMat) return true;
-      const sameMap = (mat.map && firstMat.map && mat.map.image === firstMat.map.image) || (!mat.map && !firstMat.map);
-      const sameColor = (!mat.color && !firstMat.color) || (mat.color && firstMat.color && mat.color.getHex() === firstMat.color.getHex());
-      return sameMap && sameColor;
-    });
+    finalMaterial = materials;
+    for (const grp of groups) {
+      combinedGeo.addGroup(grp.start, grp.count, grp.materialIndex);
+    }
+  }
 
-    if (allIdentical) {
-      finalMaterial = firstMat;
-    } else {
-      finalMaterial = materials;
-      for (const grp of groups) {
-        combinedGeo.addGroup(grp.start, grp.count, grp.materialIndex);
-      }
+  // Configure alpha cutout and depth offset for materials with textures
+  const allFinalMats = Array.isArray(finalMaterial) ? finalMaterial : [finalMaterial];
+  for (const m of allFinalMats) {
+    if (m && (m.map || m.alphaMap)) {
+      m.alphaTest = 0.5;
+      m.depthWrite = true;
+      m.polygonOffset = true;
+      m.polygonOffsetFactor = -1;
+      m.polygonOffsetUnits = -1;
+      m.side = THREE.DoubleSide;
     }
   }
 
@@ -685,6 +712,12 @@ export function applyLiveColorQuantization(
 
     mat.map = newTexture;
     mat._quantizedCanvas = canvas;
+    // Keep the discrete source of truth as well as the display canvas.  The
+    // canvas is filtered by WebGL in the viewport, whereas 3MF paint needs a
+    // single, unambiguous palette index for every sample it bakes into a face.
+    mat._quantizedLabels = labels;
+    mat._quantizedLabelsWidth = W;
+    mat._quantizedLabelsHeight = H;
     mat._quantizationEnabled = true;
     mat.needsUpdate = true;
   }
@@ -710,7 +743,8 @@ export async function exportMultiColor3MF(
   isUvFlipped = false,
   customPalette = null,
   despeckleSize = 0,
-  smoothLevel = 0
+  smoothLevel = 0,
+  paintResolutionMm = 0.25
 ) {
   rootObject.updateWorldMatrix(true, true);
 
@@ -822,12 +856,31 @@ export async function exportMultiColor3MF(
       }
 
       const ctx = canvas.getContext('2d');
-      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const imgData = imageData.data;
       const map = m.map || m._originalMap;
       const offset = map?.offset || new THREE.Vector2(0, 0);
       const repeat = map?.repeat || new THREE.Vector2(1, 1);
       const W = canvas.width;
       const H = canvas.height;
+
+      // Reuse the exact post-despeckle/post-smoothing labels that drive the
+      // preview when possible. Falling back to label generation here keeps
+      // exports deterministic even when no live preview was requested.
+      let labels = null;
+      if (isQuantizeEnabled && m._quantizationEnabled &&
+        m._quantizedLabelsWidth === W && m._quantizedLabelsHeight === H &&
+        m._quantizedLabels?.length === W * H) {
+        labels = m._quantizedLabels;
+      } else {
+        labels = new Uint8Array(W * H);
+        for (let i = 0, p = 0; i < imgData.length; i += 4, p++) {
+          const lutIdx = ((imgData[i] >> 3) << 10) | ((imgData[i + 1] >> 3) << 5) | (imgData[i + 2] >> 3);
+          labels[p] = indexLut[lutIdx];
+        }
+        if (despeckleSize > 0) labels = despeckleLabels(labels, W, H, despeckleSize, palette.length);
+        if (smoothLevel > 0) labels = smoothBoundaries(labels, W, H, smoothLevel, palette.length);
+      }
 
       materialSamplers.set(m, (rawU, rawV) => {
         let u = rawU * repeat.x + offset.x;
@@ -835,38 +888,25 @@ export async function exportMultiColor3MF(
         const su = ((u % 1) + 1) % 1;
         const sv = ((v % 1) + 1) % 1;
         const px = Math.min(W - 1, Math.max(0, Math.floor(su * W)));
-        const py = Math.min(H - 1, Math.max(0, Math.floor(sv * H)));
+        // Match Three.js WebGL texture coordinate orientation:
+        // In Three.js, textures default to flipY = true (v = 1.0 is canvas top row 0, v = 0.0 is bottom row H - 1).
+        const finalV = (map?.flipY ?? true) ? (1.0 - sv) : sv;
+        const py = Math.min(H - 1, Math.max(0, Math.floor(finalV * H)));
         const off = (py * W + px) * 4;
-        return getClosestColor(imgData[off], imgData[off + 1], imgData[off + 2]);
+        const color = labels[py * W + px];
+        const alpha = imgData[off + 3];
+        return { color, alpha };
       });
     } else if (m.color) {
       const colIdx = getClosestColor(Math.round(m.color.r * 255), Math.round(m.color.g * 255), Math.round(m.color.b * 255));
-      materialSamplers.set(m, () => colIdx);
+      materialSamplers.set(m, () => ({ color: colIdx, alpha: 255 }));
     } else {
-      materialSamplers.set(m, () => 0);
+      materialSamplers.set(m, () => ({ color: 0, alpha: 255 }));
     }
   }
 
-  // 3. COLLECT AND WELD ALL TRIANGLES ACROSS ALL MESHES (1 micron grid)
-  const coordMap = new Map();
-  const weldedVertices = [];
-  const factor = 1000;
-
-  function getOrAddWeldedVertex(x, y, z) {
-    const ix = Math.round(x * factor);
-    const iy = Math.round(y * factor);
-    const iz = Math.round(z * factor);
-    const key = `${ix}_${iy}_${iz}`;
-    if (coordMap.has(key)) {
-      return coordMap.get(key);
-    }
-    const idx = weldedVertices.length;
-    coordMap.set(key, idx);
-    weldedVertices.push([x, y, z]);
-    return idx;
-  }
-
-  let trianglesXml = '';
+  // 3. COLLECT INITIAL TRIANGLES ACROSS ALL MESHES
+  const initialTriangles = [];
   const tempV0 = new THREE.Vector3();
   const tempV1 = new THREE.Vector3();
   const tempV2 = new THREE.Vector3();
@@ -893,7 +933,7 @@ export async function exportMultiColor3MF(
         }
       }
 
-      const sampler = materialSamplers.get(mat) || (() => 0);
+      const sampler = materialSamplers.get(mat) || (() => ({ color: 0, alpha: 255 }));
 
       const i0 = idx ? idx.getX(t * 3) : (t * 3);
       const i1 = idx ? idx.getX(t * 3 + 1) : (t * 3 + 1);
@@ -916,12 +956,6 @@ export async function exportMultiColor3MF(
       const y2 = -tempV2.z * scaleRatio;
       const z2 = (tempV2.y - minZ) * scaleRatio;
 
-      const v0 = getOrAddWeldedVertex(x0, y0, z0);
-      const v1 = getOrAddWeldedVertex(x1, y1, z1);
-      const v2 = getOrAddWeldedVertex(x2, y2, z2);
-
-      if (v0 === v1 || v1 === v2 || v0 === v2) continue;
-
       const u0 = uvAttr ? uvAttr.getX(i0) : 0;
       const v0_uv = uvAttr ? uvAttr.getY(i0) : 0;
       const u1 = uvAttr ? uvAttr.getX(i1) : 0;
@@ -929,20 +963,290 @@ export async function exportMultiColor3MF(
       const u2 = uvAttr ? uvAttr.getX(i2) : 0;
       const v2_uv = uvAttr ? uvAttr.getY(i2) : 0;
 
-      const c0 = sampler(u0, v0_uv);
-      const c1 = sampler(u1, v1_uv);
-      const c2 = sampler(u2, v2_uv);
-
-      let chosenColor = c0;
-      if (c1 === c2) chosenColor = c1;
-      else if (c0 === c2) chosenColor = c0;
-
-      const colorIdx1Based = chosenColor + 1;
-      const mmuHex = getPrusaMmuHex(colorIdx1Based);
-
-      trianglesXml += `<triangle v1="${v0}" v2="${v1}" v3="${v2}" slic3rpe:mmu_segmentation="${mmuHex}" paint_color="${colorIdx1Based}" pid="1" p1="${chosenColor}" />\n`;
+      initialTriangles.push({
+        p0: [x0, y0, z0],
+        p1: [x1, y1, z1],
+        p2: [x2, y2, z2],
+        u0, v0: v0_uv,
+        u1, v1: v1_uv,
+        u2, v2: v2_uv,
+        sampler
+      });
     }
   }
+
+  // 4. ADAPTIVE CONFORMING COLOR-BOUNDARY REFINEMENT
+  // Prevents "triangle-only" coloring by subdividing along texture color & decal boundaries
+  // while guaranteeing ZERO T-junctions and 100% watertight connectivity.
+  function distSq(a, b) {
+    const dx = a[0] - b[0];
+    const dy = a[1] - b[1];
+    const dz = a[2] - b[2];
+    return dx * dx + dy * dy + dz * dz;
+  }
+
+  function getPosKey(x, y, z) {
+    return `${Math.round(x * 1000)}_${Math.round(y * 1000)}_${Math.round(z * 1000)}`;
+  }
+
+  function getEdgeKey(pA, pB) {
+    const kA = getPosKey(pA[0], pA[1], pA[2]);
+    const kB = getPosKey(pB[0], pB[1], pB[2]);
+    return kA < kB ? `${kA}|${kB}` : `${kB}|${kA}`;
+  }
+
+  // A barycentric 4x4 coverage grid catches transitions which happen to miss
+  // an edge midpoint. Unlike the old hand-picked probes it is symmetric and
+  // is also used to select a representative paint color for the final face.
+  const BARY_WEIGHTS = [];
+  for (let row = 0; row <= 4; row++) {
+    for (let col = 0; col <= 4 - row; col++) {
+      BARY_WEIGHTS.push([row / 4, col / 4, (4 - row - col) / 4]);
+    }
+  }
+  BARY_WEIGHTS.push([1 / 3, 1 / 3, 1 / 3]);
+
+  function sampleCoverage(tri) {
+    const { u0, v0, u1, v1, u2, v2, sampler } = tri;
+    const colors = new Map();
+    let opaqueCount = 0;
+    let transparentCount = 0;
+
+    for (const [w0, w1, w2] of BARY_WEIGHTS) {
+      const s = sampler(w0 * u0 + w1 * u1 + w2 * u2, w0 * v0 + w1 * v1 + w2 * v2);
+      if (s.alpha < 128) {
+        transparentCount++;
+      } else {
+        opaqueCount++;
+        colors.set(s.color, (colors.get(s.color) || 0) + 1);
+      }
+    }
+    return { colors, opaqueCount, transparentCount };
+  }
+
+  function triangleHasVariation(tri) {
+    const coverage = sampleCoverage(tri);
+    return coverage.colors.size > 1 || (coverage.opaqueCount > 0 && coverage.transparentCount > 0);
+  }
+
+  let currentTriangles = initialTriangles;
+  // 3MF paint is per-face, so this is the physical sampling resolution of the
+  // baked paint mesh. A 0.25 mm default is below a typical 0.4 mm nozzle while
+  // keeping the file much smaller than a triangle-per-texture-pixel export.
+  const paintStepMm = Math.max(0.1, Math.min(2.0, Number(paintResolutionMm) || 0.25));
+  const MIN_SPLIT_EDGE_LEN_SQ = paintStepMm * paintStepMm;
+  let largestInitialEdge = paintStepMm;
+  for (const tri of initialTriangles) {
+    largestInitialEdge = Math.max(
+      largestInitialEdge,
+      Math.sqrt(distSq(tri.p0, tri.p1)),
+      Math.sqrt(distSq(tri.p1, tri.p2)),
+      Math.sqrt(distSq(tri.p2, tri.p0))
+    );
+  }
+  // Derive the required depth from the requested print resolution instead of
+  // silently capping every model at four midpoint splits.
+  const MAX_REFINEMENT_PASSES = Math.min(11, Math.max(1, Math.ceil(Math.log2(largestInitialEdge / paintStepMm))));
+  const MAX_OUTPUT_TRIANGLES = 750000;
+  let refinementLimited = false;
+
+  for (let pass = 0; pass < MAX_REFINEMENT_PASSES; pass++) {
+    const splitEdges = new Set();
+
+    for (let i = 0; i < currentTriangles.length; i++) {
+      const tri = currentTriangles[i];
+      const e0LenSq = distSq(tri.p0, tri.p1);
+      const e1LenSq = distSq(tri.p1, tri.p2);
+      const e2LenSq = distSq(tri.p2, tri.p0);
+      const maxLenSq = Math.max(e0LenSq, e1LenSq, e2LenSq);
+
+      if (maxLenSq > MIN_SPLIT_EDGE_LEN_SQ && triangleHasVariation(tri)) {
+        splitEdges.add(getEdgeKey(tri.p0, tri.p1));
+        splitEdges.add(getEdgeKey(tri.p1, tri.p2));
+        splitEdges.add(getEdgeKey(tri.p2, tri.p0));
+      }
+    }
+
+    if (splitEdges.size === 0) {
+      break;
+    }
+
+    // A pathological UV layout can map a high-detail texture onto a very
+    // large area. Keep exports loadable and record that the requested paint
+    // resolution could not be reached instead of exhausting browser memory.
+    if (currentTriangles.length * 4 > MAX_OUTPUT_TRIANGLES) {
+      refinementLimited = true;
+      break;
+    }
+
+    const midpointCache = new Map();
+    function getMidpoint(pA, pB) {
+      const ek = getEdgeKey(pA, pB);
+      let m = midpointCache.get(ek);
+      if (!m) {
+        m = [(pA[0] + pB[0]) * 0.5, (pA[1] + pB[1]) * 0.5, (pA[2] + pB[2]) * 0.5];
+        midpointCache.set(ek, m);
+      }
+      return m;
+    }
+
+    const nextTriangles = [];
+
+    for (let i = 0; i < currentTriangles.length; i++) {
+      const tri = currentTriangles[i];
+      const { p0, p1, p2, u0, v0, u1, v1, u2, v2, sampler } = tri;
+
+      const s01 = splitEdges.has(getEdgeKey(p0, p1));
+      const s12 = splitEdges.has(getEdgeKey(p1, p2));
+      const s20 = splitEdges.has(getEdgeKey(p2, p0));
+
+      const splitCount = (s01 ? 1 : 0) + (s12 ? 1 : 0) + (s20 ? 1 : 0);
+
+      if (splitCount === 0) {
+        nextTriangles.push(tri);
+      } else if (splitCount === 1) {
+        if (s01) {
+          const m01 = getMidpoint(p0, p1);
+          const um01 = (u0 + u1) * 0.5, vm01 = (v0 + v1) * 0.5;
+          nextTriangles.push(
+            { p0, p1: m01, p2, u0, v0, u1: um01, v1: vm01, u2, v2, sampler },
+            { p0: m01, p1, p2, u0: um01, v0: vm01, u1, v1, u2, v2, sampler }
+          );
+        } else if (s12) {
+          const m12 = getMidpoint(p1, p2);
+          const um12 = (u1 + u2) * 0.5, vm12 = (v1 + v2) * 0.5;
+          nextTriangles.push(
+            { p0, p1, p2: m12, u0, v0, u1, v1, u2: um12, v2: vm12, sampler },
+            { p0, p1: m12, p2, u0, v0, u1: um12, v1: vm12, u2, v2, sampler }
+          );
+        } else {
+          const m20 = getMidpoint(p2, p0);
+          const um20 = (u2 + u0) * 0.5, vm20 = (v2 + v0) * 0.5;
+          nextTriangles.push(
+            { p0, p1, p2: m20, u0, v0, u1, v1, u2: um20, v2: vm20, sampler },
+            { p0: m20, p1, p2, u0: um20, v0: vm20, u1, v1, u2, v2, sampler }
+          );
+        }
+      } else if (splitCount === 2) {
+        if (s01 && s12) {
+          const m01 = getMidpoint(p0, p1);
+          const um01 = (u0 + u1) * 0.5, vm01 = (v0 + v1) * 0.5;
+          const m12 = getMidpoint(p1, p2);
+          const um12 = (u1 + u2) * 0.5, vm12 = (v1 + v2) * 0.5;
+          nextTriangles.push(
+            { p0: m01, p1, p2: m12, u0: um01, v0: vm01, u1, v1, u2: um12, v2: vm12, sampler },
+            { p0, p1: m01, p2, u0, v0, u1: um01, v1: vm01, u2, v2, sampler },
+            { p0: m01, p1: m12, p2, u0: um01, v0: vm01, u1: um12, v1: vm12, u2, v2, sampler }
+          );
+        } else if (s12 && s20) {
+          const m12 = getMidpoint(p1, p2);
+          const um12 = (u1 + u2) * 0.5, vm12 = (v1 + v2) * 0.5;
+          const m20 = getMidpoint(p2, p0);
+          const um20 = (u2 + u0) * 0.5, vm20 = (v2 + v0) * 0.5;
+          nextTriangles.push(
+            { p0: m12, p1: p2, p2: m20, u0: um12, v0: vm12, u1, v1, u2: um20, v2: vm20, sampler },
+            { p0: p1, p1: m12, p2: p0, u0: u1, v0: v1, u1: um12, v1: vm12, u2: u0, v2: v0, sampler },
+            { p0: m12, p1: m20, p2: p0, u0: um12, v0: vm12, u1: um20, v1: vm20, u2: u0, v2: v0, sampler }
+          );
+        } else {
+          const m20 = getMidpoint(p2, p0);
+          const um20 = (u2 + u0) * 0.5, vm20 = (v2 + v0) * 0.5;
+          const m01 = getMidpoint(p0, p1);
+          const um01 = (u0 + u1) * 0.5, vm01 = (v0 + v1) * 0.5;
+          nextTriangles.push(
+            { p0: m20, p1: p0, p2: m01, u0: um20, v0: vm20, u1: u0, v1: v0, u2: um01, v2: vm01, sampler },
+            { p0: p2, p1: m20, p2: p1, u0: u2, v0: v2, u1: um20, v1: vm20, u2: u1, v2: v1, sampler },
+            { p0: m20, p1: m01, p2: p1, u0: um20, v0: vm20, u1: um01, v1: vm01, u2: u1, v2: v1, sampler }
+          );
+        }
+      } else {
+        // splitCount === 3: Quad-split
+        const m01 = getMidpoint(p0, p1);
+        const um01 = (u0 + u1) * 0.5, vm01 = (v0 + v1) * 0.5;
+        const m12 = getMidpoint(p1, p2);
+        const um12 = (u1 + u2) * 0.5, vm12 = (v1 + v2) * 0.5;
+        const m20 = getMidpoint(p2, p0);
+        const um20 = (u2 + u0) * 0.5, vm20 = (v2 + v0) * 0.5;
+
+        nextTriangles.push(
+          { p0, p1: m01, p2: m20, u0, v0, u1: um01, v1: vm01, u2: um20, v2: vm20, sampler },
+          { p0: m01, p1, p2: m12, u0: um01, v0: vm01, u1, v1, u2: um12, v2: vm12, sampler },
+          { p0: m20, p1: m12, p2, u0: um20, v0: vm20, u1: um12, v1: vm12, u2, v2, sampler },
+          { p0: m01, p1: m12, p2: m20, u0: um01, v0: vm01, u1: um12, v1: vm12, u2: um20, v2: vm20, sampler }
+        );
+      }
+    }
+
+    currentTriangles = nextTriangles;
+  }
+
+  // 5. WELD VERTICES AND EMIT WATERTIGHT MULTI-MATERIAL 3MF MESH
+  const coordMap = new Map();
+  const weldedVertices = [];
+  const factor = 1000;
+
+  function getOrAddWeldedVertex(x, y, z) {
+    const ix = Math.round(x * factor);
+    const iy = Math.round(y * factor);
+    const iz = Math.round(z * factor);
+    const key = `${ix}_${iy}_${iz}`;
+    if (coordMap.has(key)) {
+      return coordMap.get(key);
+    }
+    const idx = weldedVertices.length;
+    coordMap.set(key, idx);
+    weldedVertices.push([x, y, z]);
+    return idx;
+  }
+
+  let allTrianglesXml = '';
+  let emittedTriangleCount = 0;
+
+  function emitTriangle(v0, v1, v2, chosenColor) {
+    const colorIdx = Math.max(0, Math.min(palette.length - 1, chosenColor));
+    const colorIdx1Based = colorIdx + 1;
+    const mmuHex = getPrusaMmuHex(colorIdx1Based);
+    allTrianglesXml += `<triangle v1="${v0}" v2="${v1}" v3="${v2}" slic3rpe:mmu_segmentation="${mmuHex}" paint_color="${colorIdx1Based}" pid="1" p1="${colorIdx}" />\n`;
+    emittedTriangleCount++;
+  }
+
+  for (let i = 0; i < currentTriangles.length; i++) {
+    const tri = currentTriangles[i];
+    const { p0, p1, p2, u0, v0, u1, v1, u2, v2, sampler } = tri;
+
+    const coverage = sampleCoverage(tri);
+
+    // A fully transparent decal triangle contributes no paint. This only
+    // removes the transparent overlay face; the underlying model remains in
+    // the export and is never carved by this step.
+    if (coverage.opaqueCount === 0) {
+      continue;
+    }
+
+    let chosenColor = 0;
+    let bestCount = -1;
+    for (const [color, count] of coverage.colors) {
+      if (count > bestCount) {
+        chosenColor = color;
+        bestCount = count;
+      }
+    }
+
+    const v0_idx = getOrAddWeldedVertex(p0[0], p0[1], p0[2]);
+    const v1_idx = getOrAddWeldedVertex(p1[0], p1[1], p1[2]);
+    const v2_idx = getOrAddWeldedVertex(p2[0], p2[1], p2[2]);
+
+    if (v0_idx !== v1_idx && v1_idx !== v2_idx && v0_idx !== v2_idx) {
+      emitTriangle(v0_idx, v1_idx, v2_idx, chosenColor);
+    }
+  }
+
+  rootObject._lastPaintBake = {
+    requestedResolutionMm: paintStepMm,
+    refinementPasses: MAX_REFINEMENT_PASSES,
+    refinementLimited,
+    triangleCount: emittedTriangleCount
+  };
 
   let verticesXml = '';
   for (let i = 0; i < weldedVertices.length; i++) {
@@ -968,7 +1272,7 @@ export async function exportMultiColor3MF(
           ${verticesXml}
         </vertices>
         <triangles>
-          ${trianglesXml}
+          ${allTrianglesXml}
         </triangles>
       </mesh>
     </object>
@@ -1048,14 +1352,16 @@ export function getModelTextures(rootObject) {
   const textures = new Map();
   rootObject.traverse(child => {
     if (child.isMesh && child.material) {
-      const mat = Array.isArray(child.material) ? child.material : [child.material];
-      if (mat.map && !textures.has(mat.map)) {
-        textures.set(mat.map, {
-          slot: 'BaseColor',
-          width: mat.map.image?.width || 0,
-          height: mat.map.image?.height || 0,
-          mimeType: 'image/png'
-        });
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      for (const mat of mats) {
+        if (mat && mat.map && !textures.has(mat.map)) {
+          textures.set(mat.map, {
+            slot: 'BaseColor',
+            width: mat.map.image?.width || 0,
+            height: mat.map.image?.height || 0,
+            mimeType: 'image/png'
+          });
+        }
       }
     }
   });

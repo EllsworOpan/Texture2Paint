@@ -1,7 +1,7 @@
-import * as THREE          from 'three';
-import { GLTFLoader }       from 'three/addons/loaders/GLTFLoader.js';
-import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
-import { RoomEnvironment }  from 'three/addons/environments/RoomEnvironment.js';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { applyUvFlip, getModelTextures } from './processor.js';
 
 export class Viewer {
@@ -39,6 +39,8 @@ export class Viewer {
 
     this._wireframe = false;
     this._isUvFlipped = false;
+    this._alphaCutout = true;
+    this._alphaTest = 0.5;
 
     addEventListener('resize', () => this._onResize());
 
@@ -63,15 +65,15 @@ export class Viewer {
   };
 
   _frame(obj) {
-    const box    = new THREE.Box3().setFromObject(obj);
-    const size   = box.getSize(new THREE.Vector3());
+    const box = new THREE.Box3().setFromObject(obj);
+    const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     obj.position.sub(center);
     const dist = maxDim * (this.camera.aspect < 1 ? 2.6 : 1.8);
     this.camera.position.set(dist, dist * 0.7, dist);
     this.camera.near = maxDim / 100;
-    this.camera.far  = maxDim * 50;
+    this.camera.far = maxDim * 50;
     this.camera.updateProjectionMatrix();
     this.controls.target.set(0, 0, 0);
     this.controls.update();
@@ -85,7 +87,10 @@ export class Viewer {
     this._envIntensity = v;
     if (this.currentModel) {
       this.currentModel.traverse(o => {
-        if (o.isMesh && o.material) o.material.envMapIntensity = v;
+        if (o.isMesh && o.material) {
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          for (const m of mats) m.envMapIntensity = v;
+        }
       });
     }
   }
@@ -110,13 +115,34 @@ export class Viewer {
     this._wireframe = on;
     if (this.currentModel) {
       this.currentModel.traverse(o => {
-        if (o.isMesh && o.material) o.material.wireframe = on;
+        if (o.isMesh && o.material) {
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          for (const m of mats) m.wireframe = on;
+        }
       });
     }
   }
 
   resetCamera() {
     if (this.currentModel) this._frame(this.currentModel);
+  }
+
+  setAlphaCutout(enabled) {
+    this._alphaCutout = Boolean(enabled);
+    this.applyMaterialSettings();
+  }
+
+  setAlphaTest(val) {
+    this._alphaTest = Math.max(0, Math.min(1, Number(val)));
+    this.applyMaterialSettings();
+  }
+
+  isAlphaCutout() {
+    return this._alphaCutout;
+  }
+
+  getAlphaTest() {
+    return this._alphaTest;
   }
 
   _applyMaterialSettings(obj) {
@@ -126,9 +152,24 @@ export class Viewer {
         for (const material of materials) {
           material.envMapIntensity = this._envIntensity;
           material.wireframe = this._wireframe;
+
+          // Configure alpha testing, depth write, and polygon offset for overlayed decals
+          if (material.map || material.alphaMap) {
+            material.alphaTest = this._alphaCutout ? (this._alphaTest ?? 0.5) : 0;
+            material.depthWrite = true;
+            material.polygonOffset = true;
+            material.polygonOffsetFactor = -1;
+            material.polygonOffsetUnits = -1;
+            material.side = THREE.DoubleSide;
+            material.needsUpdate = true;
+          }
         }
       }
     });
+  }
+
+  applyMaterialSettings() {
+    if (this.currentModel) this._applyMaterialSettings(this.currentModel);
   }
 
   countTriangles(scene) {
@@ -173,7 +214,7 @@ export class Viewer {
 
   async loadGLB(glbBuffer) {
     const blob = new Blob([glbBuffer], { type: 'model/gltf-binary' });
-    const url  = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(blob);
     const gltf = await this.loader.loadAsync(url);
     const loaded = this.loadObject(gltf.scene);
 
