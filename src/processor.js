@@ -135,11 +135,11 @@ export function normalizeGeometryForExport(rootObject) {
 /**
  * Canonicalizes an imported 3D model into a fixed, unified internal representation:
  * - Bakes all UV texture transforms (offset, repeat, rotation) directly into UV coordinates.
- * - If multiple sub-meshes exist, bakes their world transforms and merges them into a single consolidated Mesh.
+ * - Preserves authored mesh/component boundaries unless an explicit merge is requested.
  * - Handles single materials or multi-material groups with preserved texture maps and colors.
  * - Ensures attributes are Float32 and vertex normals are computed.
  */
-export function canonicalizeModel(rootObject) {
+export function canonicalizeModel(rootObject, { mergeMeshes = false } = {}) {
   if (!rootObject) return rootObject;
   rootObject.updateWorldMatrix(true, true);
 
@@ -166,12 +166,17 @@ export function canonicalizeModel(rootObject) {
     }
   }
 
-  // 2. If already a single mesh, cache original geometry and return
-  if (meshes.length === 1) {
-    const single = meshes[0];
-    if (!single._originalGeometry) {
-      single._originalGeometry = single.geometry.clone();
-    }
+  // 2. Cache originals and keep semantic mesh/component boundaries by default.
+  // Importers commonly use separate meshes for decals, clothing shells, and
+  // other authored parts. Flattening those parts on import made it impossible
+  // for later processing operations to reason about them. A caller which
+  // explicitly needs a single mesh (the repair "Join sub-meshes" operation)
+  // can still request the legacy merge behavior.
+  for (const mesh of meshes) {
+    if (!mesh._originalGeometry) mesh._originalGeometry = mesh.geometry.clone();
+  }
+
+  if (meshes.length === 1 || !mergeMeshes) {
     rootObject._isCanonical = true;
     return rootObject;
   }
@@ -312,6 +317,1260 @@ export function canonicalizeModel(rootObject) {
   rootObject._isCanonical = true;
 
   return rootObject;
+}
+
+/**
+ * Creates an isolated working copy. Geometry, materials, and texture objects
+ * are cloned so processing the visible model never mutates the import source.
+ */
+export function cloneModelForProcessing(rootObject) {
+  if (!rootObject) return null;
+  const clone = rootObject.clone(true);
+  clone.traverse(child => {
+    if (!child.isMesh) return;
+    if (child.geometry) child.geometry = child.geometry.clone();
+    const cloneMaterial = mat => {
+      if (!mat) return mat;
+      const next = mat.clone();
+      for (const slot of ['map', 'alphaMap', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap']) {
+        if (next[slot]) next[slot] = next[slot].clone();
+      }
+      return next;
+    };
+    child.material = Array.isArray(child.material)
+      ? child.material.map(cloneMaterial)
+      : cloneMaterial(child.material);
+    child._originalGeometry = child.geometry?.clone();
+  });
+  return clone;
+}
+
+function triangleVertexIndex(geometry, triangleIndex, corner) {
+  const index = geometry.index;
+  return index ? index.getX(triangleIndex * 3 + corner) : triangleIndex * 3 + corner;
+}
+
+function triangleMaterialIndex(geometry, triangleIndex) {
+  const elementOffset = triangleIndex * 3;
+  for (const group of geometry.groups || []) {
+    if (elementOffset >= group.start && elementOffset < group.start + group.count) {
+      return group.materialIndex || 0;
+    }
+  }
+  return 0;
+}
+
+function materialAt(mesh, materialIndex) {
+  return Array.isArray(mesh.material)
+    ? (mesh.material[materialIndex] || mesh.material[0])
+    : mesh.material;
+}
+
+function surfacePositionKey(position, vertexIndex, inverseTolerance) {
+  return `${Math.round(position.getX(vertexIndex) * inverseTolerance)}_` +
+    `${Math.round(position.getY(vertexIndex) * inverseTolerance)}_` +
+    `${Math.round(position.getZ(vertexIndex) * inverseTolerance)}`;
+}
+
+function collectConnectedTriangleSets(geometry) {
+  const position = geometry.attributes.position;
+  const triangleCount = geometry.index ? geometry.index.count / 3 : position.count / 3;
+  if (triangleCount === 0) return [];
+
+  geometry.computeBoundingBox();
+  const size = geometry.boundingBox.getSize(new THREE.Vector3());
+  const tolerance = Math.max(size.length() * 1e-7, 1e-8);
+  const inverseTolerance = 1 / tolerance;
+  const parent = new Int32Array(triangleCount);
+  for (let i = 0; i < triangleCount; i++) parent[i] = i;
+  const find = i => {
+    let root = i;
+    while (parent[root] !== root) root = parent[root];
+    while (parent[i] !== i) {
+      const next = parent[i];
+      parent[i] = root;
+      i = next;
+    }
+    return root;
+  };
+  const unite = (a, b) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+
+  // Geometric edge keys reconnect UV seams while keeping components which
+  // merely touch at one vertex separate.
+  const firstTriangleForEdge = new Map();
+  for (let t = 0; t < triangleCount; t++) {
+    const ids = [0, 1, 2].map(c => triangleVertexIndex(geometry, t, c));
+    const keys = ids.map(i => surfacePositionKey(position, i, inverseTolerance));
+    for (const [a, b] of [[0, 1], [1, 2], [2, 0]]) {
+      const edge = keys[a] < keys[b] ? `${keys[a]}|${keys[b]}` : `${keys[b]}|${keys[a]}`;
+      const previous = firstTriangleForEdge.get(edge);
+      if (previous === undefined) firstTriangleForEdge.set(edge, t);
+      else unite(t, previous);
+    }
+  }
+
+  const sets = new Map();
+  for (let t = 0; t < triangleCount; t++) {
+    const root = find(t);
+    if (!sets.has(root)) sets.set(root, []);
+    sets.get(root).push(t);
+  }
+  return [...sets.values()].sort((a, b) => a[0] - b[0]);
+}
+
+function makeTriangleRecord(component, triangleIndex) {
+  const { mesh } = component;
+  const geometry = mesh.geometry;
+  const position = geometry.attributes.position;
+  const normal = geometry.attributes.normal;
+  const uv = geometry.attributes.uv;
+  const matrix = mesh.matrixWorld;
+  const normalMatrix = new THREE.Matrix3().getNormalMatrix(matrix);
+  const points = [];
+  const normals = [];
+  const uvs = [];
+
+  for (let corner = 0; corner < 3; corner++) {
+    const vertexIndex = triangleVertexIndex(geometry, triangleIndex, corner);
+    const localPoint = new THREE.Vector3();
+    if (typeof mesh.getVertexPosition === 'function') mesh.getVertexPosition(vertexIndex, localPoint);
+    else localPoint.set(position.getX(vertexIndex), position.getY(vertexIndex), position.getZ(vertexIndex));
+    points.push(localPoint.applyMatrix4(matrix));
+    if (normal && !mesh.isSkinnedMesh && !mesh.morphTargetInfluences) {
+      normals.push(new THREE.Vector3(
+        normal.getX(vertexIndex), normal.getY(vertexIndex), normal.getZ(vertexIndex)
+      ).applyMatrix3(normalMatrix).normalize());
+    }
+    uvs.push(uv
+      ? new THREE.Vector2(uv.getX(vertexIndex), uv.getY(vertexIndex))
+      : new THREE.Vector2());
+  }
+
+  const triangle = new THREE.Triangle(points[0], points[1], points[2]);
+  const faceNormal = triangle.getNormal(new THREE.Vector3());
+  const averagedNormal = normals.length
+    ? normals.reduce((sum, n) => sum.add(n), new THREE.Vector3()).normalize()
+    : faceNormal.clone();
+  const materialIndex = triangleMaterialIndex(geometry, triangleIndex);
+  return {
+    triangleIndex,
+    triangle,
+    points,
+    normals: normals.length ? normals : [faceNormal, faceNormal, faceNormal],
+    uvs,
+    faceNormal,
+    normal: averagedNormal.lengthSq() > 0 ? averagedNormal : faceNormal,
+    materialIndex,
+    material: materialAt(mesh, materialIndex),
+    box: new THREE.Box3().setFromPoints(points),
+    centroid: triangle.getMidpoint(new THREE.Vector3()),
+  };
+}
+
+/**
+ * Segments the normalized model into connected surface components. The IDs are
+ * deterministic for a given model and survive isolated processing clones.
+ */
+export function collectSurfaceComponents(rootObject) {
+  if (!rootObject) return [];
+  rootObject.updateWorldMatrix(true, true);
+  const components = [];
+  let meshIndex = 0;
+
+  rootObject.traverse(mesh => {
+    if (!mesh.isMesh || !mesh.geometry?.attributes?.position) return;
+    const connectedSets = collectConnectedTriangleSets(mesh.geometry);
+    connectedSets.forEach((triangleIndices, componentIndex) => {
+      const descriptor = {
+        id: `mesh-${meshIndex}-component-${componentIndex}`,
+        mesh,
+        meshIndex,
+        componentIndex,
+        triangleIndices,
+        triangleCount: triangleIndices.length,
+        name: mesh.name || `Mesh ${meshIndex + 1}`,
+        label: connectedSets.length > 1
+          ? `${mesh.name || `Mesh ${meshIndex + 1}`} · part ${componentIndex + 1}`
+          : (mesh.name || `Mesh ${meshIndex + 1}`),
+        box: new THREE.Box3(),
+        area: 0,
+        boundaryEdges: 0,
+        materials: new Set(),
+        records: [],
+      };
+
+      const edgeCounts = new Map();
+      const position = mesh.geometry.attributes.position;
+      mesh.geometry.computeBoundingBox();
+      const localSize = mesh.geometry.boundingBox.getSize(new THREE.Vector3());
+      const inverseTolerance = 1 / Math.max(localSize.length() * 1e-7, 1e-8);
+
+      for (const triangleIndex of triangleIndices) {
+        const record = makeTriangleRecord(descriptor, triangleIndex);
+        descriptor.records.push(record);
+        descriptor.box.union(record.box);
+        descriptor.area += record.triangle.getArea();
+        if (record.material) descriptor.materials.add(record.material);
+
+        const ids = [0, 1, 2].map(c => triangleVertexIndex(mesh.geometry, triangleIndex, c));
+        const keys = ids.map(i => surfacePositionKey(position, i, inverseTolerance));
+        for (const [a, b] of [[0, 1], [1, 2], [2, 0]]) {
+          const edge = keys[a] < keys[b] ? `${keys[a]}|${keys[b]}` : `${keys[b]}|${keys[a]}`;
+          edgeCounts.set(edge, (edgeCounts.get(edge) || 0) + 1);
+        }
+      }
+      descriptor.boundaryEdges = [...edgeCounts.values()].filter(count => count === 1).length;
+      descriptor.hasTexture = [...descriptor.materials].some(mat => Boolean(mat?.map || mat?.alphaMap));
+      components.push(descriptor);
+    });
+    meshIndex++;
+  });
+  return components;
+}
+
+function buildTriangleBvh(records, depth = 0) {
+  if (!records.length) return null;
+  const box = new THREE.Box3();
+  for (const record of records) box.union(record.box);
+  if (records.length <= 12 || depth >= 24) return { box, records, left: null, right: null };
+  const size = box.getSize(new THREE.Vector3());
+  const axis = size.x >= size.y && size.x >= size.z ? 'x' : (size.y >= size.z ? 'y' : 'z');
+  records.sort((a, b) => a.centroid[axis] - b.centroid[axis]);
+  const middle = Math.floor(records.length / 2);
+  return {
+    box,
+    records: null,
+    left: buildTriangleBvh(records.slice(0, middle), depth + 1),
+    right: buildTriangleBvh(records.slice(middle), depth + 1),
+  };
+}
+
+function nearestTriangleInBvh(node, point, best = { distanceSq: Infinity, record: null, point: null }) {
+  if (!node || node.box.distanceToPoint(point) ** 2 > best.distanceSq) return best;
+  if (node.records) {
+    const closest = new THREE.Vector3();
+    for (const record of node.records) {
+      record.triangle.closestPointToPoint(point, closest);
+      const distanceSq = closest.distanceToSquared(point);
+      if (distanceSq < best.distanceSq) {
+        best = { distanceSq, record, point: closest.clone() };
+      }
+    }
+    return best;
+  }
+  best = nearestTriangleInBvh(node.left, point, best);
+  return nearestTriangleInBvh(node.right, point, best);
+}
+
+function raycastTriangleBvh(node, ray, best = { distance: Infinity, record: null, point: null }) {
+  if (!node || !ray.intersectsBox(node.box)) return best;
+  if (node.records) {
+    const hit = new THREE.Vector3();
+    for (const record of node.records) {
+      const point = ray.intersectTriangle(
+        record.points[0], record.points[1], record.points[2], false, hit
+      );
+      if (!point) continue;
+      const distance = point.distanceTo(ray.origin);
+      if (distance > 1e-7 && distance < best.distance) {
+        best = { distance, record, point: point.clone() };
+      }
+    }
+    return best;
+  }
+  best = raycastTriangleBvh(node.left, ray, best);
+  return raycastTriangleBvh(node.right, ray, best);
+}
+
+function collectBvhRecordsNear(node, point, maxDistance, output) {
+  if (!node || node.box.distanceToPoint(point) > maxDistance) return;
+  if (node.records) {
+    output.push(...node.records);
+    return;
+  }
+  collectBvhRecordsNear(node.left, point, maxDistance, output);
+  collectBvhRecordsNear(node.right, point, maxDistance, output);
+}
+
+function textureHasUsefulAlpha(materials) {
+  if (typeof document === 'undefined') return false;
+  for (const material of materials) {
+    const image = material?.alphaMap?.image || material?.map?.image;
+    if (!image?.width || !image?.height) continue;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.min(64, image.width);
+      canvas.height = Math.min(64, image.height);
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let transparent = 0, opaque = 0;
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i] < 245) transparent++;
+        if (data[i] > 10) opaque++;
+      }
+      if (transparent > data.length / 40 && opaque > data.length / 40) return true;
+    } catch {
+      // A texture which cannot be sampled is still available for manual use;
+      // it simply does not receive the alpha confidence boost.
+    }
+  }
+  return false;
+}
+
+/**
+ * Permissively discovers textured open sheets and ranks likely receivers.
+ * Distance affects confidence only; it never prevents manual selection.
+ */
+export function analyzeFloatingDecals(rootObject) {
+  const components = collectSurfaceComponents(rootObject);
+  if (!components.length) return { components: [], candidates: [] };
+  const modelBox = new THREE.Box3().setFromObject(rootObject);
+  const modelDiagonal = Math.max(modelBox.getSize(new THREE.Vector3()).length(), 1e-8);
+  const largestArea = Math.max(...components.map(component => component.area), 1e-8);
+  const bvhById = new Map();
+  const getBvh = component => {
+    if (!bvhById.has(component.id)) {
+      bvhById.set(component.id, buildTriangleBvh(component.records.slice()));
+    }
+    return bvhById.get(component.id);
+  };
+
+  const candidates = [];
+  for (const source of components) {
+    if (!source.hasTexture || source.boundaryEdges === 0 || source.area >= largestArea * 0.9) continue;
+    let bestReceiver = null;
+    let bestMetrics = null;
+    const receivers = components.filter(candidate => candidate !== source && candidate.area > source.area * 1.25);
+
+    for (const receiver of receivers) {
+      const bvh = getBvh(receiver);
+      const distances = [];
+      const alignments = [];
+      const stride = Math.max(1, Math.ceil(source.records.length / 64));
+      for (let i = 0; i < source.records.length; i += stride) {
+        const sample = source.records[i];
+        const nearest = nearestTriangleInBvh(bvh, sample.centroid);
+        if (!nearest.record) continue;
+        distances.push(Math.sqrt(nearest.distanceSq));
+        alignments.push(Math.abs(sample.normal.dot(nearest.record.normal)));
+      }
+      if (!distances.length) continue;
+      distances.sort((a, b) => a - b);
+      alignments.sort((a, b) => a - b);
+      const medianDistance = distances[Math.floor(distances.length / 2)];
+      const medianAlignment = alignments[Math.floor(alignments.length / 2)];
+      const areaRatio = receiver.area / Math.max(source.area, 1e-8);
+      const distanceScore = Math.exp(-medianDistance / (modelDiagonal * 0.02));
+      const areaScore = Math.min(1, Math.log2(Math.max(1, areaRatio)) / 4);
+      const receiverScore = 0.5 * medianAlignment + 0.3 * distanceScore + 0.2 * areaScore;
+      if (!bestMetrics || receiverScore > bestMetrics.receiverScore) {
+        bestReceiver = receiver;
+        bestMetrics = { medianDistance, medianAlignment, areaRatio, receiverScore };
+      }
+    }
+
+    if (!bestReceiver || !bestMetrics) continue;
+    const alphaCue = textureHasUsefulAlpha(source.materials);
+    const distanceScore = Math.exp(-bestMetrics.medianDistance / (modelDiagonal * 0.02));
+    const areaScore = Math.min(1, Math.log2(Math.max(1, bestMetrics.areaRatio)) / 4);
+    const score = 0.2 +
+      0.25 * bestMetrics.medianAlignment +
+      0.2 * distanceScore +
+      0.15 * areaScore +
+      (alphaCue ? 0.2 : 0);
+    const confidence = score >= 0.75 ? 'high' : (score >= 0.52 ? 'medium' : 'low');
+    candidates.push({
+      id: source.id,
+      label: source.label,
+      triangleCount: source.triangleCount,
+      receiverId: bestReceiver.id,
+      receiverLabel: bestReceiver.label,
+      confidence,
+      score,
+      autoSelected: confidence === 'high',
+      alphaCue,
+      medianDistance: bestMetrics.medianDistance,
+      normalAlignment: bestMetrics.medianAlignment,
+    });
+  }
+
+  const summaries = components.map(component => ({
+    id: component.id,
+    label: component.label,
+    triangleCount: component.triangleCount,
+    area: component.area,
+    boundaryEdges: component.boundaryEdges,
+    hasTexture: component.hasTexture,
+  }));
+  return { components: summaries, candidates };
+}
+
+function createImageSampler(material) {
+  if (typeof document === 'undefined') return null;
+  const texture = material?.map;
+  const image = texture?.image;
+  if (!image?.width || !image?.height) return null;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.min(2048, image.width);
+    canvas.height = Math.min(2048, image.height);
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    const wrap = (value, mode) => {
+      if (mode === THREE.RepeatWrapping) return ((value % 1) + 1) % 1;
+      if (mode === THREE.MirroredRepeatWrapping) {
+        const n = Math.floor(value);
+        const f = value - n;
+        return Math.abs(n) % 2 ? 1 - f : f;
+      }
+      return Math.max(0, Math.min(1, value));
+    };
+    return uv => {
+      let u = uv.x, v = uv.y;
+      if (texture.matrixAutoUpdate) texture.updateMatrix();
+      const transformed = new THREE.Vector2(u, v).applyMatrix3(texture.matrix);
+      u = wrap(transformed.x, texture.wrapS);
+      v = wrap(transformed.y, texture.wrapT);
+      const displayV = texture.flipY ? 1 - v : v;
+      const fx = Math.min(canvas.width - 1, Math.max(0, u * (canvas.width - 1)));
+      const fy = Math.min(canvas.height - 1, Math.max(0, displayV * (canvas.height - 1)));
+      if (texture.magFilter === THREE.NearestFilter || texture.minFilter === THREE.NearestFilter) {
+        const offset = (Math.round(fy) * canvas.width + Math.round(fx)) * 4;
+        return [pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]];
+      }
+
+      const x0 = Math.floor(fx), y0 = Math.floor(fy);
+      const x1 = Math.min(canvas.width - 1, x0 + 1);
+      const y1 = Math.min(canvas.height - 1, y0 + 1);
+      const tx = fx - x0, ty = fy - y0;
+      const result = [0, 0, 0, 0];
+      for (let channel = 0; channel < 4; channel++) {
+        const top = pixels[(y0 * canvas.width + x0) * 4 + channel] * (1 - tx) +
+          pixels[(y0 * canvas.width + x1) * 4 + channel] * tx;
+        const bottom = pixels[(y1 * canvas.width + x0) * 4 + channel] * (1 - tx) +
+          pixels[(y1 * canvas.width + x1) * 4 + channel] * tx;
+        result[channel] = top * (1 - ty) + bottom * ty;
+      }
+      return result;
+    };
+  } catch {
+    return null;
+  }
+}
+
+function imageSpaceUv(texture, uv) {
+  let u = uv.x, v = uv.y;
+  if (texture) {
+    if (texture.matrixAutoUpdate) texture.updateMatrix();
+    const transformed = new THREE.Vector2(u, v).applyMatrix3(texture.matrix);
+    const wrap = (value, mode) => {
+      if (mode === THREE.RepeatWrapping) return ((value % 1) + 1) % 1;
+      if (mode === THREE.MirroredRepeatWrapping) {
+        const whole = Math.floor(value);
+        const fraction = value - whole;
+        return Math.abs(whole) % 2 ? 1 - fraction : fraction;
+      }
+      return Math.max(0, Math.min(1, value));
+    };
+    u = wrap(transformed.x, texture.wrapS);
+    v = wrap(transformed.y, texture.wrapT);
+    if (texture.flipY) v = 1 - v;
+  } else {
+    u = Math.max(0, Math.min(1, u));
+    v = 1 - Math.max(0, Math.min(1, v));
+  }
+  return new THREE.Vector2(u, v);
+}
+
+function averageComponentNormal(component) {
+  if (!component.records.length) return { normal: new THREE.Vector3(0, 0, 1), planarity: 0 };
+  const reference = component.records[0].faceNormal || component.records[0].normal;
+  const sum = new THREE.Vector3();
+  for (const record of component.records) {
+    const normal = record.faceNormal || record.normal;
+    sum.addScaledVector(normal, normal.dot(reference) < 0 ? -1 : 1);
+  }
+  const normal = sum.normalize();
+  const planarity = component.records.reduce(
+    (total, record) => total + Math.abs((record.faceNormal || record.normal).dot(normal)), 0
+  ) / component.records.length;
+  return { normal, planarity };
+}
+
+function componentProjectionFootprint(component, normal) {
+  const helper = Math.abs(normal.x) < 0.9
+    ? new THREE.Vector3(1, 0, 0)
+    : new THREE.Vector3(0, 1, 0);
+  const tangent = new THREE.Vector3().crossVectors(normal, helper).normalize();
+  const bitangent = new THREE.Vector3().crossVectors(normal, tangent).normalize();
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  for (const record of component.records) {
+    for (const point of record.points) {
+      const u = point.dot(tangent);
+      const v = point.dot(bitangent);
+      minU = Math.min(minU, u); maxU = Math.max(maxU, u);
+      minV = Math.min(minV, v); maxV = Math.max(maxV, v);
+    }
+  }
+  const margin = Math.max(maxU - minU, maxV - minV) * 0.03 + 1e-6;
+  return { tangent, bitangent, minU, maxU, minV, maxV, margin };
+}
+
+function triangleOverlapsProjectionFootprint(record, footprint) {
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  for (const point of record.points) {
+    const u = point.dot(footprint.tangent);
+    const v = point.dot(footprint.bitangent);
+    minU = Math.min(minU, u); maxU = Math.max(maxU, u);
+    minV = Math.min(minV, v); maxV = Math.max(maxV, v);
+  }
+  return maxU >= footprint.minU - footprint.margin &&
+    minU <= footprint.maxU + footprint.margin &&
+    maxV >= footprint.minV - footprint.margin &&
+    minV <= footprint.maxV + footprint.margin;
+}
+
+function interpolateRecordUv(record, barycentric) {
+  return new THREE.Vector2(
+    record.uvs[0].x * barycentric.x + record.uvs[1].x * barycentric.y + record.uvs[2].x * barycentric.z,
+    record.uvs[0].y * barycentric.x + record.uvs[1].y * barycentric.y + record.uvs[2].y * barycentric.z
+  );
+}
+
+function prepareLocalProjection(source, receiverBvh) {
+  const bindings = new Map();
+  const gaps = [];
+  let positive = 0;
+  let negative = 0;
+  for (const record of source.records) {
+    const normal = record.faceNormal || record.normal;
+    if (!normal || normal.lengthSq() < 1e-12) continue;
+    let best = null;
+    for (const sign of [1, -1]) {
+      const ray = new THREE.Ray(
+        record.centroid,
+        normal.clone().normalize().multiplyScalar(sign)
+      );
+      const hit = raycastTriangleBvh(receiverBvh, ray);
+      if (!hit.record) continue;
+      const receiverNormal = hit.record.faceNormal || hit.record.normal;
+      if (Math.abs(normal.dot(receiverNormal)) < 0.15) continue;
+      if (!best || hit.distance < best.distance) best = { ...hit, sign };
+    }
+    if (!best) continue;
+    bindings.set(record, { sign: best.sign, distance: best.distance });
+    gaps.push(best.distance);
+    if (best.sign > 0) positive++;
+    else negative++;
+  }
+
+  gaps.sort((a, b) => a - b);
+  const percentile = fraction => gaps.length
+    ? gaps[Math.min(gaps.length - 1, Math.floor((gaps.length - 1) * fraction))]
+    : 0;
+  const medianGap = percentile(0.5);
+  const highGap = percentile(0.95);
+  return {
+    bindings,
+    defaultSign: positive === negative ? 0 : (positive > negative ? 1 : -1),
+    // This range is learned from the selected sheet/receiver pair, so a user
+    // can intentionally project a distant sheet without a fixed gap limit.
+    maxDistance: gaps.length
+      ? Math.max(highGap * 2, medianGap * 4, 1e-5)
+      : Infinity,
+  };
+}
+
+function localNormalProjectionHit(point, receiverNormal, sourceBvh, projection) {
+  const candidates = [];
+  collectBvhRecordsNear(sourceBvh, point, projection.maxDistance, candidates);
+  const projectedPoint = new THREE.Vector3();
+  const barycentric = new THREE.Vector3();
+  let best = null;
+
+  for (const record of candidates) {
+    const localNormal = record.faceNormal || record.normal;
+    if (!localNormal || localNormal.lengthSq() < 1e-12) continue;
+    if (receiverNormal && Math.abs(localNormal.dot(receiverNormal)) < 0.15) continue;
+    const planePoint = record.points[0];
+    const signedDistance =
+      (planePoint.x - point.x) * localNormal.x +
+      (planePoint.y - point.y) * localNormal.y +
+      (planePoint.z - point.z) * localNormal.z;
+    const distance = Math.abs(signedDistance);
+    if (distance > projection.maxDistance) continue;
+
+    const binding = projection.bindings.get(record);
+    const sourceToReceiverSign = binding?.sign || projection.defaultSign;
+    // If the source triangle was bound to one side of the receiver, only
+    // project back toward that same side.
+    if (sourceToReceiverSign && signedDistance * sourceToReceiverSign >= 0) continue;
+
+    projectedPoint.copy(point).addScaledVector(localNormal, signedDistance);
+    record.triangle.getBarycoord(projectedPoint, barycentric);
+    if (Math.min(barycentric.x, barycentric.y, barycentric.z) < -1e-5) continue;
+    if (!best || distance < best.distance) {
+      best = { distance, record, point: projectedPoint.clone() };
+    }
+  }
+  return best;
+}
+
+function projectionHit(point, receiverNormal, source, sourceBvh, mode, localProjection) {
+  if (mode === 'auto' && localProjection) {
+    // Automatic mode follows the curved sheet triangle-by-triangle. It does
+    // not mix global sheet and receiver directions, which can fan or smear.
+    return localNormalProjectionHit(point, receiverNormal, sourceBvh, localProjection);
+  }
+  const directions = [];
+  if (mode === 'closest') {
+    directions.length = 0;
+  } else if (mode === 'sheet-normal') {
+    directions.push(source.averageNormal);
+  } else if (mode === 'receiver-normal') {
+    directions.push(receiverNormal);
+  } else {
+    if (source.planarity >= 0.92) directions.push(source.averageNormal);
+    directions.push(receiverNormal);
+    if (source.planarity < 0.92) directions.push(source.averageNormal);
+  }
+
+  let best = null;
+  for (const direction of directions) {
+    if (!direction || direction.lengthSq() < 1e-12) continue;
+    for (const sign of [1, -1]) {
+      const ray = new THREE.Ray(point, direction.clone().normalize().multiplyScalar(sign));
+      const hit = raycastTriangleBvh(sourceBvh, ray);
+      if (hit.record && (!best || hit.distance < best.distance)) best = hit;
+    }
+  }
+  if (best) return best;
+
+  const nearest = nearestTriangleInBvh(sourceBvh, point);
+  if (!nearest.record) return null;
+  const barycentric = nearest.record.triangle.getBarycoord(nearest.point, new THREE.Vector3());
+  // Nearest points outside a projected decal footprint land on an edge. Only
+  // accept an interior closest-point projection to avoid paint halos.
+  if (Math.min(barycentric.x, barycentric.y, barycentric.z) <= 1e-5) return null;
+  return { distance: Math.sqrt(nearest.distanceSq), record: nearest.record, point: nearest.point };
+}
+
+function configureLocalizedBakedTexture(source, target) {
+  if (!target) return;
+  target.name = `${source?.name || 'Texture'}_DecalPatch`;
+  target.colorSpace = source?.colorSpace || THREE.SRGBColorSpace;
+  target.flipY = true;
+  target.wrapS = THREE.ClampToEdgeWrapping;
+  target.wrapT = THREE.ClampToEdgeWrapping;
+  target.magFilter = source?.magFilter || THREE.LinearFilter;
+  target.minFilter = source?.minFilter || THREE.LinearMipmapLinearFilter;
+  target.generateMipmaps = source?.generateMipmaps ?? true;
+  target.anisotropy = source?.anisotropy || 1;
+}
+
+function uvTriangleBounds(record) {
+  const uvs = record.imageUvs || record.uvs;
+  return {
+    record,
+    minX: Math.min(...uvs.map(uv => uv.x)),
+    maxX: Math.max(...uvs.map(uv => uv.x)),
+    minY: Math.min(...uvs.map(uv => uv.y)),
+    maxY: Math.max(...uvs.map(uv => uv.y)),
+    layerIndex: 0,
+  };
+}
+
+function uvTrianglesOverlap(a, b, epsilon = 1e-7) {
+  const aUvs = a.imageUvs || a.uvs;
+  const bUvs = b.imageUvs || b.uvs;
+  for (const triangle of [aUvs, bUvs]) {
+    for (let edge = 0; edge < 3; edge++) {
+      const start = triangle[edge];
+      const end = triangle[(edge + 1) % 3];
+      const axisX = -(end.y - start.y);
+      const axisY = end.x - start.x;
+      const axisLength = Math.hypot(axisX, axisY);
+      if (axisLength <= epsilon) continue;
+      let aMin = Infinity, aMax = -Infinity, bMin = Infinity, bMax = -Infinity;
+      for (const point of aUvs) {
+        const projection = (point.x * axisX + point.y * axisY) / axisLength;
+        aMin = Math.min(aMin, projection); aMax = Math.max(aMax, projection);
+      }
+      for (const point of bUvs) {
+        const projection = (point.x * axisX + point.y * axisY) / axisLength;
+        bMin = Math.min(bMin, projection); bMax = Math.max(bMax, projection);
+      }
+      // Sharing an edge or vertex is safe. Only positive-area overlap means
+      // these triangles cannot use the same editable texture instance.
+      if (Math.min(aMax, bMax) - Math.max(aMin, bMin) <= epsilon) return false;
+    }
+  }
+  return true;
+}
+
+function splitIntoNonOverlappingUvLayers(records, epsilon = 1e-7) {
+  const sorted = records.map(uvTriangleBounds).sort((a, b) => a.minX - b.minX);
+  const active = [];
+  const layers = [];
+  for (const item of sorted) {
+    for (let index = active.length - 1; index >= 0; index--) {
+      if (active[index].maxX - item.minX <= epsilon) active.splice(index, 1);
+    }
+    const unavailableLayers = new Set();
+    for (const other of active) {
+      if (Math.min(item.maxY, other.maxY) - Math.max(item.minY, other.minY) <= epsilon) continue;
+      if (uvTrianglesOverlap(item.record, other.record, epsilon)) {
+        unavailableLayers.add(other.layerIndex);
+      }
+    }
+    let layerIndex = 0;
+    while (unavailableLayers.has(layerIndex)) layerIndex++;
+    item.layerIndex = layerIndex;
+    if (!layers[layerIndex]) layers[layerIndex] = [];
+    layers[layerIndex].push(item.record);
+    active.push(item);
+  }
+  return layers.filter(Boolean);
+}
+
+function splitIntoUvCharts(records) {
+  if (records.length <= 1) return records.length ? [records] : [];
+  const parent = records.map((_, index) => index);
+  const find = index => {
+    while (parent[index] !== index) {
+      parent[index] = parent[parent[index]];
+      index = parent[index];
+    }
+    return index;
+  };
+  const unite = (a, b) => {
+    a = find(a); b = find(b);
+    if (a !== b) parent[b] = a;
+  };
+  const bounds = new THREE.Box3();
+  for (const record of records) for (const point of record.points) bounds.expandByPoint(point);
+  const positionScale = 1 / Math.max(bounds.getSize(new THREE.Vector3()).length() * 1e-7, 1e-8);
+  const uvScale = 1e6;
+  const vertexKey = (point, uv) => [
+    Math.round(point.x * positionScale),
+    Math.round(point.y * positionScale),
+    Math.round(point.z * positionScale),
+    Math.round(uv.x * uvScale),
+    Math.round(uv.y * uvScale),
+  ].join(',');
+  const edgeOwners = new Map();
+  records.forEach((record, recordIndex) => {
+    const uvs = record.imageUvs || record.uvs;
+    const keys = record.points.map((point, corner) => vertexKey(point, uvs[corner]));
+    for (const [a, b] of [[0, 1], [1, 2], [2, 0]]) {
+      const edge = keys[a] < keys[b] ? `${keys[a]}|${keys[b]}` : `${keys[b]}|${keys[a]}`;
+      const previous = edgeOwners.get(edge);
+      if (previous === undefined) edgeOwners.set(edge, recordIndex);
+      else unite(recordIndex, previous);
+    }
+  });
+  const charts = new Map();
+  records.forEach((record, index) => {
+    const root = find(index);
+    if (!charts.has(root)) charts.set(root, []);
+    charts.get(root).push(record);
+  });
+  return [...charts.values()];
+}
+
+function chartImageBounds(records) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const record of records) {
+    for (const uv of record.imageUvs || record.uvs) {
+      minX = Math.min(minX, uv.x); maxX = Math.max(maxX, uv.x);
+      minY = Math.min(minY, uv.y); maxY = Math.max(maxY, uv.y);
+    }
+  }
+  const width = Math.max(maxX - minX, 1e-6);
+  const height = Math.max(maxY - minY, 1e-6);
+  const padX = Math.max(width * 0.025, 1e-5);
+  const padY = Math.max(height * 0.025, 1e-5);
+  return {
+    minX: Math.max(0, minX - padX),
+    maxX: Math.min(1, maxX + padX),
+    minY: Math.max(0, minY - padY),
+    maxY: Math.min(1, maxY + padY),
+  };
+}
+
+function localizeChartUvs(records, bounds) {
+  const width = Math.max(bounds.maxX - bounds.minX, 1e-6);
+  const height = Math.max(bounds.maxY - bounds.minY, 1e-6);
+  for (const record of records) {
+    record.localImageUvs = record.imageUvs.map(uv => new THREE.Vector2(
+      (uv.x - bounds.minX) / width,
+      (uv.y - bounds.minY) / height
+    ));
+  }
+}
+
+function writeLocalizedChartUvs(geometry, records) {
+  const uv = geometry.attributes.uv;
+  if (!uv) return;
+  for (const record of records) {
+    for (let corner = 0; corner < 3; corner++) {
+      const local = record.localImageUvs[corner];
+      uv.setXY(record.triangleIndex * 3 + corner, local.x, 1 - local.y);
+    }
+  }
+  uv.needsUpdate = true;
+}
+
+function dilateTexturePadding(state, iterations = 4) {
+  const { width, height } = state.canvas;
+  let mask = state.coverageMask;
+  let pixels = state.imageData.data;
+  for (let iteration = 0; iteration < iterations; iteration++) {
+    const nextMask = mask.slice();
+    const nextPixels = new Uint8ClampedArray(pixels);
+    let changed = false;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const index = y * width + x;
+        if (mask[index]) continue;
+        let source = -1;
+        for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          const neighbor = ny * width + nx;
+          if (mask[neighbor]) { source = neighbor; break; }
+        }
+        if (source < 0) continue;
+        nextPixels.set(pixels.subarray(source * 4, source * 4 + 4), index * 4);
+        nextMask[index] = 1;
+        changed = true;
+      }
+    }
+    mask = nextMask;
+    pixels = nextPixels;
+    if (!changed) break;
+  }
+  state.coverageMask = mask;
+  state.imageData.data.set(pixels);
+}
+
+function rebuildTriangleGroups(geometry, materialIndices) {
+  geometry.clearGroups();
+  let start = 0;
+  let active = materialIndices[0] ?? 0;
+  let count = 0;
+  const flush = () => {
+    if (count > 0) geometry.addGroup(start, count, active);
+    start += count;
+    count = 0;
+  };
+  for (const materialIndex of materialIndices) {
+    if (materialIndex !== active) {
+      flush();
+      active = materialIndex;
+    }
+    count += 3;
+  }
+  flush();
+}
+
+function removeSurfaceComponents(rootObject, components, removedIds) {
+  const byMesh = new Map();
+  for (const component of components) {
+    if (!removedIds.has(component.id)) continue;
+    if (!byMesh.has(component.mesh)) byMesh.set(component.mesh, new Set());
+    for (const triangleIndex of component.triangleIndices) byMesh.get(component.mesh).add(triangleIndex);
+  }
+
+  for (const [mesh, removedTriangles] of byMesh) {
+    const geometry = mesh.geometry;
+    const triangleCount = geometry.index ? geometry.index.count / 3 : geometry.attributes.position.count / 3;
+    if (removedTriangles.size >= triangleCount) {
+      mesh.parent?.remove(mesh);
+      continue;
+    }
+
+    const source = geometry.index ? geometry.toNonIndexed() : geometry;
+    const next = new THREE.BufferGeometry();
+    const copySelectedAttribute = attribute => {
+      const values = [];
+      const attributeArray = attribute.isInterleavedBufferAttribute ? attribute.data.array : attribute.array;
+      const ArrayType = attributeArray.constructor;
+      const readComponent = (vertexIndex, componentIndex) => attribute.isInterleavedBufferAttribute
+        ? attribute.data.array[vertexIndex * attribute.data.stride + attribute.offset + componentIndex]
+        : attribute.array[vertexIndex * attribute.itemSize + componentIndex];
+      for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++) {
+        if (removedTriangles.has(triangleIndex)) continue;
+        for (let corner = 0; corner < 3; corner++) {
+          const vertexIndex = triangleIndex * 3 + corner;
+          for (let componentIndex = 0; componentIndex < attribute.itemSize; componentIndex++) {
+            values.push(readComponent(vertexIndex, componentIndex));
+          }
+        }
+      }
+      return new THREE.BufferAttribute(
+        new ArrayType(values), attribute.itemSize, attribute.normalized
+      );
+    };
+    for (const [name, attribute] of Object.entries(source.attributes)) {
+      next.setAttribute(name, copySelectedAttribute(attribute));
+    }
+    for (const [name, morphAttributes] of Object.entries(source.morphAttributes || {})) {
+      next.morphAttributes[name] = morphAttributes.map(copySelectedAttribute);
+    }
+    next.morphTargetsRelative = source.morphTargetsRelative;
+
+    let groupStart = 0;
+    let activeMaterial = null;
+    let activeCount = 0;
+    const flushGroup = () => {
+      if (activeMaterial === null || activeCount === 0) return;
+      next.addGroup(groupStart, activeCount, activeMaterial);
+      groupStart += activeCount;
+      activeCount = 0;
+    };
+    for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++) {
+      if (removedTriangles.has(triangleIndex)) continue;
+      const materialIndex = triangleMaterialIndex(geometry, triangleIndex);
+      if (activeMaterial !== materialIndex) {
+        flushGroup();
+        activeMaterial = materialIndex;
+      }
+      activeCount += 3;
+    }
+    flushGroup();
+    if (Array.isArray(mesh.material)) {
+      const usedMaterialIndices = [...new Set(next.groups.map(group => group.materialIndex))];
+      const remap = new Map(usedMaterialIndices.map((oldIndex, newIndex) => [oldIndex, newIndex]));
+      const usedMaterials = usedMaterialIndices.map(index => mesh.material[index] || mesh.material[0]);
+      for (const group of next.groups) group.materialIndex = remap.get(group.materialIndex) || 0;
+      mesh.material = usedMaterials.length === 1 ? usedMaterials[0] : usedMaterials;
+    }
+    next.computeBoundingBox();
+    next.computeBoundingSphere();
+    mesh.geometry = next;
+    mesh._originalGeometry = next.clone();
+  }
+}
+
+/**
+ * Projects selected textured sheets into receiver textures and physically
+ * removes successfully baked source geometry from the processed model.
+ */
+export async function bakeFloatingDecals(rootObject, selections, {
+  alphaThreshold = 0.5,
+  alphaCutout = true,
+  projectionMode = 'auto',
+} = {}) {
+  if (!rootObject || !Array.isArray(selections) || selections.length === 0) {
+    return { baked: 0, removedComponents: 0, details: [] };
+  }
+  rootObject.updateWorldMatrix(true, true);
+  const components = collectSurfaceComponents(rootObject);
+  const byId = new Map(components.map(component => [component.id, component]));
+  const removedIds = new Set();
+  const details = [];
+  const selectionsByReceiver = new Map();
+  for (const selection of selections) {
+    const receiverId = selection.receiverId;
+    if (!receiverId) continue;
+    if (!selectionsByReceiver.has(receiverId)) selectionsByReceiver.set(receiverId, []);
+    selectionsByReceiver.get(receiverId).push(selection);
+  }
+  const srgbToLinear = value => {
+    value /= 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  };
+  const linearToSrgbByte = value => {
+    value = Math.max(0, Math.min(1, value));
+    const encoded = value <= 0.0031308 ? value * 12.92 : 1.055 * value ** (1 / 2.4) - 0.055;
+    return Math.round(encoded * 255);
+  };
+
+  for (const [receiverId, receiverSelections] of selectionsByReceiver) {
+    const receiver = byId.get(receiverId);
+    if (!receiver) continue;
+    const receiverBvh = buildTriangleBvh(receiver.records.slice());
+    if (!receiverBvh) continue;
+
+    const projectionEntries = [];
+    let largestSourceTexture = 0;
+    for (const selection of receiverSelections) {
+      const source = byId.get(selection.sourceId || selection.id);
+      if (!source || source === receiver) continue;
+      const sourceRecords = source.records.filter(record => record.material?.map);
+      const sourceBvh = buildTriangleBvh(sourceRecords.slice());
+      const samplers = new Map();
+      for (const record of sourceRecords) {
+        if (!samplers.has(record.material)) samplers.set(record.material, createImageSampler(record.material));
+        const image = record.material?.map?.image;
+        largestSourceTexture = Math.max(largestSourceTexture, image?.width || 0, image?.height || 0);
+      }
+      const orientation = averageComponentNormal(source);
+      const entry = {
+        selection,
+        source,
+        sourceBvh,
+        samplers,
+        projectionSource: {
+          ...source,
+          averageNormal: orientation.normal,
+          planarity: orientation.planarity,
+        },
+        footprint: componentProjectionFootprint(source, orientation.normal),
+        localProjection: prepareLocalProjection(source, receiverBvh),
+        pixels: 0,
+        error: !sourceBvh || ![...samplers.values()].some(Boolean) ? 'Texture is not ready' : null,
+      };
+      projectionEntries.push(entry);
+    }
+    const usableEntries = projectionEntries.filter(entry => !entry.error);
+    if (usableEntries.length === 0) {
+      for (const entry of projectionEntries) {
+        details.push({
+          sourceId: entry.source.id,
+          receiverId,
+          pixels: 0,
+          planarity: entry.projectionSource.planarity,
+          error: entry.error,
+        });
+      }
+      continue;
+    }
+
+    const receiverMesh = receiver.mesh;
+    const sourceGeometry = receiverMesh.geometry;
+    // Localized chart textures need independent UVs per triangle. Keep the
+    // authored triangle order, but detach indexed vertices so changing one UV
+    // chart cannot move a shared vertex in another chart.
+    const pendingGeometry = sourceGeometry.index
+      ? sourceGeometry.toNonIndexed()
+      : sourceGeometry.clone();
+    const triangleCount = sourceGeometry.index
+      ? sourceGeometry.index.count / 3
+      : sourceGeometry.attributes.position.count / 3;
+    const triangleMaterials = Array.from(
+      { length: triangleCount },
+      (_, triangleIndex) => triangleMaterialIndex(sourceGeometry, triangleIndex)
+    );
+    const receiverMaterials = Array.isArray(receiverMesh.material)
+      ? [...receiverMesh.material]
+      : [receiverMesh.material];
+    const recordsByMaterial = new Map();
+    for (const record of receiver.records) {
+      if (!recordsByMaterial.has(record.materialIndex)) recordsByMaterial.set(record.materialIndex, []);
+      recordsByMaterial.get(record.materialIndex).push(record);
+    }
+
+    const textureStates = [];
+    for (const [materialIndex, records] of recordsByMaterial) {
+      const originalMaterial = receiverMaterials[materialIndex] || receiverMaterials[0];
+      if (!originalMaterial) continue;
+      const baseTexture = originalMaterial._originalMap || originalMaterial.map;
+      const imageRecords = records.map(record => ({
+        ...record,
+        imageUvs: record.uvs.map(uv => imageSpaceUv(baseTexture, uv)),
+      }));
+      const baseImage = baseTexture?.image;
+      const baseWidth = baseImage?.width || 512;
+      const baseHeight = baseImage?.height || 512;
+
+      // Isolate continuous UV charts before resolving overlapping islands.
+      // This lets a small facial chart use a dedicated high-resolution texture
+      // instead of occupying only a few pixels in the full-body atlas.
+      for (const chartRecords of splitIntoUvCharts(imageRecords)) {
+        for (const layerRecords of splitIntoNonOverlappingUvLayers(chartRecords)) {
+          const couldReceiveDecal = layerRecords.some(record =>
+            usableEntries.some(entry => triangleOverlapsProjectionFootprint(record, entry.footprint))
+          );
+          if (!couldReceiveDecal) continue;
+
+          const chartBounds = chartImageBounds(layerRecords);
+          localizeChartUvs(layerRecords, chartBounds);
+          const cropWidth = Math.max(1, (chartBounds.maxX - chartBounds.minX) * baseWidth);
+          const cropHeight = Math.max(1, (chartBounds.maxY - chartBounds.minY) * baseHeight);
+          const aspect = cropWidth / cropHeight;
+          const desiredMax = Math.min(2048, Math.max(512, largestSourceTexture * 8));
+          const width = aspect >= 1
+            ? desiredMax
+            : Math.max(128, Math.round(desiredMax * aspect));
+          const height = aspect >= 1
+            ? Math.max(128, Math.round(desiredMax / aspect))
+            : desiredMax;
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext('2d', { willReadFrequently: true });
+          context.fillStyle = 'rgb(255,255,255)';
+          context.fillRect(0, 0, width, height);
+          textureStates.push({
+            materialIndex,
+            records: layerRecords,
+            material: originalMaterial.clone(),
+            baseTexture,
+            baseSampler: createImageSampler(originalMaterial),
+            canvas,
+            context,
+            imageData: context.getImageData(0, 0, width, height),
+            coverageMask: new Uint8Array(width * height),
+            chartBounds,
+            pixels: 0,
+          });
+        }
+      }
+    }
+
+    const projectedBarycentric = new THREE.Vector3();
+    const point = new THREE.Vector3();
+    const receiverNormal = new THREE.Vector3();
+    const originalUv = new THREE.Vector2();
+    for (const state of textureStates) {
+      const targetIsSrgb = state.baseTexture?.colorSpace === THREE.SRGBColorSpace;
+      const targetColor = state.material.color || new THREE.Color(1, 1, 1);
+      const targetTint = [targetColor.r, targetColor.g, targetColor.b];
+      const uvToPixel = uv => new THREE.Vector2(
+        uv.x * (state.canvas.width - 1),
+        uv.y * (state.canvas.height - 1)
+      );
+
+      for (const record of state.records) {
+        const eligibleEntries = usableEntries.filter(entry =>
+          triangleOverlapsProjectionFootprint(record, entry.footprint)
+        );
+        const localReceiverNormal = record.faceNormal || record.normal;
+        const a = uvToPixel(record.localImageUvs[0]);
+        const b = uvToPixel(record.localImageUvs[1]);
+        const c = uvToPixel(record.localImageUvs[2]);
+        const minX = Math.max(0, Math.floor(Math.min(a.x, b.x, c.x)));
+        const maxX = Math.min(state.canvas.width - 1, Math.ceil(Math.max(a.x, b.x, c.x)));
+        const minY = Math.max(0, Math.floor(Math.min(a.y, b.y, c.y)));
+        const maxY = Math.min(state.canvas.height - 1, Math.ceil(Math.max(a.y, b.y, c.y)));
+        const denominator = (b.y - c.y) * (a.x - c.x) +
+          (c.x - b.x) * (a.y - c.y);
+        if (Math.abs(denominator) < 1e-12) continue;
+
+        for (let y = minY; y <= maxY; y++) {
+          for (let x = minX; x <= maxX; x++) {
+            const px = x + 0.5, py = y + 0.5;
+            const w0 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) /
+              denominator;
+            const w1 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) /
+              denominator;
+            const w2 = 1 - w0 - w1;
+            if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue;
+
+            originalUv.set(
+              record.uvs[0].x * w0 + record.uvs[1].x * w1 + record.uvs[2].x * w2,
+              record.uvs[0].y * w0 + record.uvs[1].y * w1 + record.uvs[2].y * w2
+            );
+            const baseSample = state.baseSampler?.(originalUv) || [255, 255, 255, 255];
+            const offset = (y * state.canvas.width + x) * 4;
+            state.imageData.data[offset] = baseSample[0];
+            state.imageData.data[offset + 1] = baseSample[1];
+            state.imageData.data[offset + 2] = baseSample[2];
+            state.imageData.data[offset + 3] = baseSample[3] ?? 255;
+            state.coverageMask[y * state.canvas.width + x] = 1;
+
+            if (eligibleEntries.length === 0) continue;
+            point.set(0, 0, 0)
+              .addScaledVector(record.points[0], w0)
+              .addScaledVector(record.points[1], w1)
+              .addScaledVector(record.points[2], w2);
+            receiverNormal.copy(localReceiverNormal);
+
+            for (const entry of eligibleEntries) {
+              const hit = projectionHit(
+                point,
+                receiverNormal,
+                entry.projectionSource,
+                entry.sourceBvh,
+                entry.selection.mode || projectionMode,
+                entry.localProjection
+              );
+              if (!hit?.record) continue;
+              hit.record.triangle.getBarycoord(hit.point, projectedBarycentric);
+              const sourceUv = interpolateRecordUv(hit.record, projectedBarycentric);
+              const sample = entry.samplers.get(hit.record.material)?.(sourceUv);
+              const rawAlpha = sample
+                ? (sample[3] / 255) * (hit.record.material?.opacity ?? 1)
+                : 0;
+              if (!sample || (alphaCutout && rawAlpha < alphaThreshold)) continue;
+              const alpha = hit.record.material?.transparent ? rawAlpha : 1;
+              if (alpha <= 0) continue;
+
+              const sourceColor = hit.record.material?.color || new THREE.Color(1, 1, 1);
+              const sourceTint = [sourceColor.r, sourceColor.g, sourceColor.b];
+              const sourceIsSrgb = hit.record.material?.map?.colorSpace === THREE.SRGBColorSpace;
+              for (let channel = 0; channel < 3; channel++) {
+                const sourceTexel = sourceIsSrgb
+                  ? srgbToLinear(sample[channel])
+                  : sample[channel] / 255;
+                const targetTexel = targetIsSrgb
+                  ? srgbToLinear(state.imageData.data[offset + channel])
+                  : state.imageData.data[offset + channel] / 255;
+                const bakedTexel = sourceTexel * sourceTint[channel] /
+                  Math.max(targetTint[channel], 1e-5);
+                const blended = bakedTexel * alpha + targetTexel * (1 - alpha);
+                state.imageData.data[offset + channel] = targetIsSrgb
+                  ? linearToSrgbByte(blended)
+                  : Math.round(Math.max(0, Math.min(1, blended)) * 255);
+              }
+              state.imageData.data[offset + 3] = 255;
+              entry.pixels++;
+              state.pixels++;
+            }
+          }
+        }
+      }
+    }
+
+    const successfulEntries = usableEntries.filter(entry => entry.pixels > 0);
+    if (successfulEntries.length > 0) {
+      for (const state of textureStates) {
+        if (state.pixels === 0) continue;
+        dilateTexturePadding(state);
+        state.context.putImageData(state.imageData, 0, 0);
+        const texture = new THREE.CanvasTexture(state.canvas);
+        configureLocalizedBakedTexture(state.baseTexture, texture);
+        state.material.map = texture;
+        state.material._originalMap = texture;
+        state.material.needsUpdate = true;
+        const newMaterialIndex = receiverMaterials.length;
+        receiverMaterials.push(state.material);
+        for (const record of state.records) triangleMaterials[record.triangleIndex] = newMaterialIndex;
+        writeLocalizedChartUvs(pendingGeometry, state.records);
+      }
+      rebuildTriangleGroups(pendingGeometry, triangleMaterials);
+      pendingGeometry.computeBoundingBox();
+      pendingGeometry.computeBoundingSphere();
+      receiverMesh.geometry = pendingGeometry;
+      receiverMesh.material = receiverMaterials.length === 1 ? receiverMaterials[0] : receiverMaterials;
+      receiverMesh._originalGeometry = pendingGeometry.clone();
+      for (const entry of successfulEntries) removedIds.add(entry.source.id);
+    }
+
+    for (const entry of projectionEntries) {
+      details.push({
+        sourceId: entry.source.id,
+        receiverId,
+        pixels: entry.pixels,
+        planarity: entry.projectionSource.planarity,
+        ...(entry.error ? { error: entry.error } : {}),
+      });
+    }
+
+    // Let the UI paint between large receiver components instead of appearing
+    // frozen during a multi-decal bake.
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+
+  removeSurfaceComponents(rootObject, components, removedIds);
+  return { baked: details.filter(detail => detail.pixels > 0).length, removedComponents: removedIds.size, details };
 }
 
 /**
@@ -1367,6 +2626,75 @@ export function getModelTextures(rootObject) {
   });
   return Array.from(textures.values());
 }
+
+/** Extracts embedded image payloads from a binary glTF container. */
+export function extractGlbImages(buffer) {
+  if (ArrayBuffer.isView(buffer)) {
+    buffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+  }
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 20) return [];
+  try {
+    const view = new DataView(buffer);
+    let baseOffset = 0;
+    if (view.getUint32(0, true) !== 0x46546c67) {
+      // Node Buffers may expose a pooled backing ArrayBuffer with a non-zero
+      // byte offset. Accept the first internally valid GLB header in that case.
+      const bytes = new Uint8Array(buffer);
+      baseOffset = -1;
+      for (let i = 0; i <= bytes.length - 12; i++) {
+        if (bytes[i] === 0x67 && bytes[i + 1] === 0x6c && bytes[i + 2] === 0x54 && bytes[i + 3] === 0x46) {
+          const candidate = new DataView(buffer, i);
+          const length = candidate.getUint32(8, true);
+          if (candidate.getUint32(4, true) === 2 && length >= 20 && i + length <= buffer.byteLength) {
+            baseOffset = i;
+            break;
+          }
+        }
+      }
+      if (baseOffset < 0) return [];
+    }
+    if (view.getUint32(baseOffset + 4, true) !== 2) return [];
+    const declaredLength = view.getUint32(baseOffset + 8, true);
+    const declaredEnd = baseOffset + declaredLength;
+    if (declaredEnd > buffer.byteLength) return [];
+    let offset = baseOffset + 12;
+    let json = null;
+    let binary = null;
+    while (offset + 8 <= declaredEnd) {
+      const length = view.getUint32(offset, true);
+      const type = view.getUint32(offset + 4, true);
+      const start = offset + 8;
+      const end = start + length;
+      if (end > declaredEnd) return [];
+      if (type === 0x4e4f534a) {
+        json = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, start, length)).trim());
+      } else if (type === 0x004e4942) {
+        binary = new Uint8Array(buffer, start, length);
+      }
+      offset = end;
+    }
+    if (!json || !binary) return [];
+    const images = [];
+    for (const image of json.images || []) {
+      if (image.bufferView === undefined) continue;
+      const bufferView = json.bufferViews?.[image.bufferView];
+      if (!bufferView || (bufferView.buffer || 0) !== 0) continue;
+      const start = bufferView.byteOffset || 0;
+      const end = start + bufferView.byteLength;
+      if (start < 0 || end > binary.byteLength) continue;
+      const bytes = binary.slice(start, end);
+      images.push({
+        bytes,
+        data: bytes,
+        mimeType: image.mimeType || 'application/octet-stream',
+        byteLength: bytes.byteLength,
+      });
+    }
+    return images;
+  } catch {
+    return [];
+  }
+}
 export function linkGlbOriginalTextures() { }
 
 /**
@@ -2009,7 +3337,7 @@ export function repairBufferGeometry(geometry, options = {}) {
 export function mergeDisjointMeshes(rootObject) {
   if (!rootObject) return null;
   const originalChildren = [...rootObject.children];
-  canonicalizeModel(rootObject);
+  canonicalizeModel(rootObject, { mergeMeshes: true });
   const singleMesh = rootObject.children.find(c => c.isMesh);
   if (!singleMesh) return null;
 

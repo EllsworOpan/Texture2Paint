@@ -33,6 +33,12 @@ Textured 3D models (from 3D scanners, photogrammetry, game assets, or digital sc
 - **Boundary Smoothing:** Majority mode filter that smooths stair-stepped, pixelated color borders into clean contours and rounds out circular features (like eyes).
 - **UV Orientation Control:** Lossless vertical UV inversion (`V = 1.0 - V`) toggle with live viewport updates.
 
+### 🪄 Floating Decal Projection
+- **Geometry-Aware Detection:** Finds disconnected, textured, zero-thickness surface components and ranks their likely receiving surfaces without relying on mesh or texture names.
+- **Review Before Baking:** High-confidence sheets are selected automatically; ambiguous components remain available for manual source and receiver selection.
+- **Curved-Surface Projection:** Surface-conforming mode follows each decal triangle's local plane and normal instead of forcing one direction through a curved sheet. Manual sheet-normal, receiver-normal, and closest-surface modes remain available. Affected continuous UV charts are remapped into dedicated high-resolution textures before compositing, preserving crisp decal detail without introducing per-triangle seams; genuinely overlapping UV layers remain isolated.
+- **Clean WYSIWYG Output:** Successfully baked sheets are physically removed from the processed model. GLB, glTF, OBJ, STL, PLY, USDZ, and 3MF exporters all consume the same visible model snapshot, so backup geometry and hidden decal nodes are not serialized.
+
 ### 🖨️ Slicer-Ready Multi-Material 3MF Export
 - **Native AMS & MMU Segmentation:** Writes `<m:colorgroup>`, `slic3rpe:mmu_segmentation`, and `paint_color` attributes directly onto the mesh.
 - **Watertight Manifold Topology (Zero Cracks):** Samples colors with original UVs first, then welds coincident vertices along UV seams into shared indices. Eliminates the non-manifold open-edge errors common with multi-body converters.

@@ -885,6 +885,69 @@
       font-size: 11px;
     }
 
+    .decal-candidate-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 8px;
+      max-height: 190px;
+      overflow-y: auto;
+    }
+
+    .decal-candidate {
+      padding: 7px 8px;
+      border: 1px solid rgba(255, 255, 255, .07);
+      border-radius: var(--radius-sm);
+      background: rgba(0, 0, 0, .18);
+    }
+
+    .decal-candidate-main {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .decal-candidate-main input {
+      accent-color: var(--accent);
+    }
+
+    .decal-candidate-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 11px;
+      color: var(--text);
+    }
+
+    .decal-confidence {
+      border-radius: 3px;
+      padding: 1px 4px;
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      background: rgba(255, 255, 255, .08);
+    }
+
+    .decal-confidence.high {
+      color: #8ff0ba;
+      background: rgba(52, 211, 153, .12);
+    }
+
+    .decal-receiver {
+      width: 100%;
+      height: 25px;
+      margin-top: 6px;
+      padding: 0 22px 0 7px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--text-dim);
+      font-size: 10px;
+    }
+
     /* Dual Slider & Number Input */
     .proc-slider-row {
       display: flex;
@@ -1160,6 +1223,37 @@
         character faces.</p>
     </div>
 
+    <!-- Floating textured sheets -> receiver texture bake -->
+    <div class="proc-section">
+      <div class="proc-label-row">
+        <span class="proc-label">Floating Decal Projection</span>
+        <span class="status-badge badge-normal" id="decal-bake-badge">OFF</span>
+      </div>
+      <div class="toggle-row" style="margin-bottom: 7px;">
+        <span class="toggle-text">Bake Sheets Into Surface</span>
+        <label class="switch" for="proc-decal-bake" aria-label="Bake floating textured sheets into their receiving surface">
+          <input type="checkbox" id="proc-decal-bake">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="proc-label-row">
+        <label for="proc-decal-mode" class="proc-tag">Projection Direction</label>
+      </div>
+      <div class="select-wrapper" style="margin-top: 4px;">
+        <select id="proc-decal-mode" class="proc-select" aria-label="Floating decal projection direction">
+          <option value="auto">Surface Conforming (Local)</option>
+          <option value="sheet-normal">Along Sheet Normal</option>
+          <option value="receiver-normal">Along Surface Normal</option>
+          <option value="closest">Closest Surface</option>
+        </select>
+        <svg class="select-arrow" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z" /></svg>
+      </div>
+      <div id="decal-candidate-list" class="decal-candidate-list">
+        <div class="proc-texture-empty">Load a model to detect textured sheets</div>
+      </div>
+      <p class="proc-desc">High-confidence sheets are selected automatically. Review any ambiguous parts before baking.</p>
+    </div>
+
     <!-- Mesh Repair & Sealing (Welding, Disjoint Mesh Healing, Hole Closing) -->
     <div class="proc-section">
       <div class="proc-label-row">
@@ -1414,6 +1508,9 @@
     import { Viewer } from './src/viewer.js';
     import {
       canonicalizeModel,
+      cloneModelForProcessing,
+      analyzeFloatingDecals,
+      bakeFloatingDecals,
       applyUvFlip,
       applyLiveColorQuantization,
       exportMultiColor3MF,
@@ -1421,7 +1518,6 @@
       linkGlbOriginalTextures,
       getModelTextures,
       applyLiveMeshRepair,
-      restoreOriginalMesh,
       analyzeMeshHealth
     } from './src/processor.js';
     import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
@@ -1458,6 +1554,10 @@
     const $procAlphaSlider = $('proc-alpha-slider');
     const $alphaBadge = $('alpha-status-badge');
     const $alphaSliderBadge = $('proc-alpha-badge');
+    const $decalBakeToggle = $('proc-decal-bake');
+    const $decalBakeBadge = $('decal-bake-badge');
+    const $decalMode = $('proc-decal-mode');
+    const $decalCandidateList = $('decal-candidate-list');
     const $procRepairToggle = $('proc-repair-toggle');
     const $procCloseHoles = $('proc-close-holes');
     const $procJoinSubmeshes = $('proc-join-submeshes');
@@ -1502,6 +1602,9 @@
     let lastSourceGlbBuffer = null;
     let lastResourceUrls = [];
     let activePalette = [];
+    let sourceModelDocument = null;
+    let decalAnalysis = { components: [], candidates: [] };
+    let rebuildRevision = 0;
 
     function updateInfoDisplay(triangles) {
       if (!lastBaseName) return;
@@ -1762,6 +1865,177 @@
       }
     }
 
+    async function waitForModelTextures(rootObject, timeoutMs = 5000) {
+      const pending = [];
+      rootObject?.traverse(child => {
+        if (!child.isMesh || !child.material) return;
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+        for (const material of materials) {
+          for (const texture of [material?.map, material?.alphaMap]) {
+            const image = texture?.image;
+            if (!image || image.width > 0 || image.complete) continue;
+            if (typeof image.addEventListener !== 'function') continue;
+            pending.push(new Promise(resolve => {
+              const done = () => resolve();
+              image.addEventListener('load', done, { once: true });
+              image.addEventListener('error', done, { once: true });
+            }));
+          }
+        }
+      });
+      if (!pending.length) return;
+      await Promise.race([
+        Promise.allSettled(pending),
+        new Promise(resolve => setTimeout(resolve, timeoutMs)),
+      ]);
+    }
+
+    function selectedDecalMappings() {
+      return [...$decalCandidateList.querySelectorAll('.decal-candidate')]
+        .map(row => ({
+          sourceId: row.querySelector('input[type=checkbox]')?.dataset.sourceId,
+          checked: row.querySelector('input[type=checkbox]')?.checked,
+          receiverId: row.querySelector('select')?.value,
+          mode: $decalMode.value,
+        }))
+        .filter(item => item.checked && item.sourceId && item.receiverId);
+    }
+
+    function renderDecalCandidates() {
+      $decalCandidateList.innerHTML = '';
+      if (!decalAnalysis.candidates.length) {
+        $decalCandidateList.innerHTML = '<div class="proc-texture-empty">No textured open sheets detected</div>';
+        $decalBakeToggle.checked = false;
+        $decalBakeToggle.disabled = true;
+        $decalBakeBadge.textContent = 'NONE';
+        $decalBakeBadge.className = 'status-badge badge-normal';
+        return;
+      }
+
+      $decalBakeToggle.disabled = false;
+      for (const candidate of decalAnalysis.candidates) {
+        const row = document.createElement('div');
+        row.className = 'decal-candidate';
+
+        const main = document.createElement('div');
+        main.className = 'decal-candidate-main';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = candidate.autoSelected;
+        checkbox.dataset.sourceId = candidate.id;
+        checkbox.setAttribute('aria-label', `Project ${candidate.label}`);
+
+        const name = document.createElement('span');
+        name.className = 'decal-candidate-name';
+        name.textContent = candidate.label;
+        name.title = `${candidate.label} · ${candidate.triangleCount.toLocaleString()} triangles`;
+
+        const confidence = document.createElement('span');
+        confidence.className = `decal-confidence ${candidate.confidence}`;
+        confidence.textContent = candidate.confidence;
+        main.append(checkbox, name, confidence);
+
+        const receiver = document.createElement('select');
+        receiver.className = 'decal-receiver';
+        receiver.setAttribute('aria-label', `Receiving surface for ${candidate.label}`);
+        for (const component of decalAnalysis.components) {
+          if (component.id === candidate.id) continue;
+          const option = document.createElement('option');
+          option.value = component.id;
+          option.textContent = `Onto: ${component.label}`;
+          option.selected = component.id === candidate.receiverId;
+          receiver.appendChild(option);
+        }
+
+        const rebuildIfActive = () => {
+          if ($decalBakeToggle.checked) rebuildProcessedModel({ reason: 'Updated decal projection' });
+        };
+        checkbox.addEventListener('change', rebuildIfActive);
+        receiver.addEventListener('change', rebuildIfActive);
+        row.append(main, receiver);
+        $decalCandidateList.appendChild(row);
+      }
+    }
+
+    async function rebuildProcessedModel({ forceResample = false, reason = '' } = {}) {
+      if (!sourceModelDocument) return null;
+      const revision = ++rebuildRevision;
+      const nextModel = cloneModelForProcessing(sourceModelDocument);
+      const flipped = $procUvFlip.checked;
+      applyUvFlip(nextModel, flipped);
+
+      let decalResult = null;
+      if ($decalBakeToggle.checked) {
+        const mappings = selectedDecalMappings();
+        $decalBakeBadge.textContent = mappings.length ? 'BAKING' : 'NONE SELECTED';
+        $decalBakeBadge.className = 'status-badge badge-warn';
+        if (mappings.length) {
+          decalResult = await bakeFloatingDecals(nextModel, mappings, {
+            alphaThreshold: $procAlphaToggle.checked ? parseFloat($procAlphaSlider.value || '0.5') : 0,
+            alphaCutout: $procAlphaToggle.checked,
+            projectionMode: $decalMode.value,
+          });
+        }
+      }
+      if (revision !== rebuildRevision) return null;
+
+      let repairResult = null;
+      if ($procRepairToggle.checked) {
+        repairResult = applyLiveMeshRepair(nextModel, {
+          enabled: true,
+          tolerance: parseFloat($weldNum.value || '0.001'),
+          closeHoles: $procCloseHoles.checked,
+          joinSubmeshes: $procJoinSubmeshes.checked,
+        });
+      }
+
+      const enabled = $quantizeToggle.checked;
+      const numColors = parseInt($colorsNum.value || '5', 10);
+      const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
+      const smoothLevel = parseInt($smoothSlider.value || '0', 10);
+      if (forceResample) activePalette = [];
+      activePalette = applyLiveColorQuantization(
+        nextModel,
+        numColors,
+        enabled,
+        (!forceResample && activePalette.length > 0) ? activePalette : null,
+        despeckleSize,
+        smoothLevel,
+        forceResample
+      );
+      if (revision !== rebuildRevision) return null;
+
+      const { triangles } = viewer.replaceObject(nextModel, { frame: false, uvFlipped: flipped });
+      updateInfoDisplay(triangles);
+      updateTextureListUI();
+      renderSwatches(activePalette);
+      updateMeshDiagnostics();
+
+      if ($decalBakeToggle.checked) {
+        const baked = decalResult?.baked || 0;
+        $decalBakeBadge.textContent = baked ? `${baked} BAKED` : 'NO HITS';
+        $decalBakeBadge.className = 'status-badge ' + (baked ? 'badge-ok' : 'badge-warn');
+      } else {
+        $decalBakeBadge.textContent = 'OFF';
+        $decalBakeBadge.className = 'status-badge badge-normal';
+      }
+
+      if ($procRepairToggle.checked && repairResult) {
+        $repairBadge.textContent = repairResult.isWatertight ? 'SEALED' : 'WELDED';
+        $repairBadge.className = 'status-badge ' + (repairResult.isWatertight ? 'badge-ok' : 'badge-warn');
+      } else {
+        $repairBadge.textContent = 'OFF';
+        $repairBadge.className = 'status-badge badge-normal';
+      }
+
+      if (reason) {
+        const failures = decalResult?.details?.filter(detail => detail.error || detail.pixels === 0).length || 0;
+        const suffix = failures ? ` · ${failures} sheet${failures === 1 ? '' : 's'} could not be projected` : '';
+        toast(`${reason}${suffix}`, failures ? 'work' : 'ok', 2200);
+      }
+      return { decalResult, repairResult, triangles };
+    }
+
     async function handleFiles(fileList) {
       let files = Array.from(fileList);
 
@@ -1825,7 +2099,9 @@
         }
 
         canonicalizeModel(loaded.object);
+        await waitForModelTextures(loaded.object);
         const { triangles } = viewer.loadObject(loaded.object);
+        sourceModelDocument = cloneModelForProcessing(viewer.currentModel);
         revokeUrls(lastResourceUrls);
         lastResourceUrls = resources.urls;
         lastSourceGlbBuffer = loaded.sourceGlbBuffer ?? null;
@@ -1838,9 +2114,15 @@
         $uvBadge.className = 'status-badge badge-normal';
         $procAlphaToggle.checked = true;
         $procAlphaSlider.value = '0.5';
+        viewer.setAlphaCutout(true);
+        viewer.setAlphaTest(0.5);
         $alphaBadge.textContent = 'CUTOUT (0.5)';
         $alphaBadge.className = 'status-badge badge-active';
         $alphaSliderBadge.textContent = '0.50';
+        $decalBakeToggle.checked = false;
+        $decalMode.value = 'auto';
+        decalAnalysis = analyzeFloatingDecals(sourceModelDocument);
+        renderDecalCandidates();
         $procBadge.textContent = lastLoadedFormat;
         updateTextureListUI();
         $procToolbar.classList.add('show');
@@ -2052,19 +2334,7 @@
           const b = parseInt(newHex.slice(5, 7), 16);
           activePalette[idx] = [r, g, b];
 
-          const enabled = $quantizeToggle.checked;
-          const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
-          const smoothLevel = parseInt($smoothSlider.value || '0', 10);
-
-          // Update palette in memory; if enabled, update viewport in real time
-          applyLiveColorQuantization(
-            viewer.currentModel,
-            activePalette.length,
-            enabled,
-            activePalette,
-            despeckleSize,
-            smoothLevel
-          );
+          rebuildProcessedModel();
         });
 
         label.appendChild(picker);
@@ -2075,7 +2345,7 @@
     let quantizeTimer;
     function updateQuantization(forceResample = false) {
       clearTimeout(quantizeTimer);
-      quantizeTimer = setTimeout(() => {
+      quantizeTimer = setTimeout(async () => {
         const enabled = $quantizeToggle.checked;
         const numColors = parseInt($colorsNum.value || '5', 10);
         const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
@@ -2087,19 +2357,7 @@
         $despeckleBadge.textContent = despeckleSize === 0 ? '0 px (Off)' : `${despeckleSize} px`;
         $smoothBadge.textContent = smoothLevel === 0 ? 'Off' : `Level ${smoothLevel}`;
 
-        // If explicitly forcing a resample, wipe local activePalette
-        if (forceResample) activePalette = [];
-
-        activePalette = applyLiveColorQuantization(
-          viewer.currentModel,
-          numColors,
-          enabled,
-          (!forceResample && activePalette.length > 0) ? activePalette : null,
-          despeckleSize,
-          smoothLevel,
-          forceResample
-        );
-        renderSwatches(activePalette);
+        await rebuildProcessedModel({ forceResample });
       }, 30);
     }
 
@@ -2158,15 +2416,9 @@
     // UV Orientation toggle listener
     $procUvFlip.addEventListener('change', e => {
       const flipped = e.target.checked;
-      viewer.setUvFlipped(flipped);
-      applyUvFlip(viewer.currentModel, flipped);
       $uvBadge.textContent = flipped ? 'FLIPPED' : 'NORMAL';
       $uvBadge.className = 'status-badge ' + (flipped ? 'badge-warn' : 'badge-normal');
-      toast(flipped ? 'Inverted Vertical UV (Flip Y)' : 'Standard Vertical UV', 'ok', 1500);
-
-      if ($quantizeToggle.checked) {
-        updateQuantization(false);
-      }
+      rebuildProcessedModel({ reason: flipped ? 'Inverted vertical UV' : 'Restored standard UVs' });
     });
 
     // Decals & Alpha Cutout listeners
@@ -2176,7 +2428,11 @@
       const testVal = parseFloat($procAlphaSlider.value || '0.5');
       $alphaBadge.textContent = enabled ? `CUTOUT (${testVal.toFixed(1)})` : 'OFF';
       $alphaBadge.className = 'status-badge ' + (enabled ? 'badge-active' : 'badge-normal');
-      toast(enabled ? `Decal cutout enabled (${testVal.toFixed(2)})` : 'Decal cutout disabled', 'ok', 1500);
+      if ($decalBakeToggle.checked) {
+        rebuildProcessedModel({ reason: enabled ? 'Updated decal cutout' : 'Baking full decal textures' });
+      } else {
+        toast(enabled ? `Decal cutout enabled (${testVal.toFixed(2)})` : 'Decal cutout disabled', 'ok', 1500);
+      }
     });
 
     $procAlphaSlider.addEventListener('input', e => {
@@ -2187,6 +2443,17 @@
         $alphaBadge.textContent = `CUTOUT (${val.toFixed(1)})`;
         $alphaBadge.className = 'status-badge badge-active';
       }
+      if ($decalBakeToggle.checked) rebuildProcessedModel();
+    });
+
+    $decalBakeToggle.addEventListener('change', () => {
+      rebuildProcessedModel({
+        reason: $decalBakeToggle.checked ? 'Projected selected sheets into the model' : 'Restored floating sheets'
+      });
+    });
+
+    $decalMode.addEventListener('change', () => {
+      if ($decalBakeToggle.checked) rebuildProcessedModel({ reason: 'Changed decal projection direction' });
     });
 
     // ── Mesh Repair & Sealing Logic ──────────────────────────────────────────
@@ -2230,51 +2497,11 @@
     function updateMeshRepair(showToast = true) {
       clearTimeout(repairTimer);
       repairTimer = setTimeout(() => {
-        if (!viewer.currentModel) return;
-        const enabled = $procRepairToggle.checked;
-        const closeHoles = $procCloseHoles.checked;
-        const joinSubmeshes = $procJoinSubmeshes.checked;
-        const tol = parseFloat($weldNum.value || '0.001');
-
-        if (!enabled) {
-          restoreOriginalMesh(viewer.currentModel);
-          viewer.applyMaterialSettings();
-          const triCount = viewer.countTriangles(viewer.currentModel);
-          updateInfoDisplay(triCount);
-          updateMeshDiagnostics();
-          $repairBadge.textContent = 'OFF';
-          $repairBadge.className = 'status-badge badge-normal';
-          if (showToast) toast('Mesh restored to original', 'work', 1500);
-          if ($quantizeToggle.checked) updateQuantization(false);
-          return;
-        }
-
-        const res = applyLiveMeshRepair(viewer.currentModel, {
-          enabled: true,
-          tolerance: tol,
-          closeHoles,
-          joinSubmeshes
+        rebuildProcessedModel({
+          reason: showToast
+            ? ($procRepairToggle.checked ? 'Rebuilt the model with mesh repair' : 'Restored the unrepaired model')
+            : ''
         });
-
-        viewer.applyMaterialSettings();
-        const triCount = viewer.countTriangles(viewer.currentModel);
-        updateInfoDisplay(triCount);
-
-        $repairBadge.textContent = res.isWatertight ? 'SEALED' : 'WELDED';
-        $repairBadge.className = 'status-badge ' + (res.isWatertight ? 'badge-ok' : 'badge-warn');
-
-        $diagStatus.textContent = res.isWatertight ? '● Sealed Watertight' : `● ${res.openEdgesAfter} Open Edges`;
-        $diagStatus.className = 'repair-diag-status ' + (res.isWatertight ? 'ok' : 'warn');
-        $diagOpenEdges.textContent = res.openEdgesAfter.toLocaleString();
-        $diagWelded.textContent = res.weldedVertices.toLocaleString();
-        $diagHoles.textContent = res.holesClosed > 0 ? `${res.holesClosed} sealed` : '0';
-
-        if (showToast) {
-          const msg = `Repaired: ${res.weldedVertices.toLocaleString()} vertices welded${res.holesClosed > 0 ? `, ${res.holesClosed} holes sealed (+${res.addedTriangles} tris)` : ''}`;
-          toast(msg, 'ok', 3000);
-        }
-
-        if ($quantizeToggle.checked) updateQuantization(false);
       }, 30);
     }
 
