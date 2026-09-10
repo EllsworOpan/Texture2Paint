@@ -93,6 +93,22 @@ function testTexture({ cutout = false } = {}) {
   return texture;
 }
 
+function solidTexture([red, green, blue, alpha]) {
+  const width = 8, height = 8;
+  const pixels = new Uint8Array(width * height * 4);
+  for (let offset = 0; offset < pixels.length; offset += 4) {
+    pixels[offset] = red;
+    pixels[offset + 1] = green;
+    pixels[offset + 2] = blue;
+    pixels[offset + 3] = alpha;
+  }
+  const texture = new THREE.DataTexture(pixels, width, height, THREE.RGBAFormat);
+  texture.needsUpdate = true;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.flipY = true;
+  return texture;
+}
+
 function curvedGridGeometry({ offset = 0, segmentsX = 8, segmentsY = 2 } = {}) {
   const positions = [];
   const uvs = [];
@@ -308,6 +324,55 @@ test('surface-conforming projection follows each triangle of a curved decal with
     assert.ok(maxX <= image.width * 0.82, `paint extended too far right: ${maxX}`);
     assert.ok(minY >= image.height * 0.18, `paint extended too far up: ${minY}`);
     assert.ok(maxY <= image.height * 0.82, `paint extended too far down: ${maxY}`);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+test('internal triangle seams remain filled in local and closest projection', async () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { createElement: () => new TestCanvas() };
+  try {
+    for (const mode of ['auto', 'closest']) {
+      const receiver = new THREE.Mesh(
+        curvedGridGeometry(),
+        new THREE.MeshBasicMaterial({ map: solidTexture([40, 80, 180, 255]) })
+      );
+      receiver.name = 'receiver';
+      const decal = new THREE.Mesh(
+        curvedGridGeometry({ offset: 0.08 }),
+        new THREE.MeshBasicMaterial({
+          map: solidTexture([220, 40, 20, 128]),
+          transparent: true,
+        })
+      );
+      decal.name = 'decal';
+      const root = new THREE.Group();
+      root.add(receiver, decal);
+      canonicalizeModel(root);
+
+      const components = collectSurfaceComponents(root);
+      const result = await bakeFloatingDecals(root, [{
+        sourceId: components.find(component => component.mesh === decal).id,
+        receiverId: components.find(component => component.mesh === receiver).id,
+        mode,
+      }], { alphaCutout: false });
+
+      assert.equal(result.baked, 1, mode);
+      const material = Array.isArray(receiver.material)
+        ? receiver.material.find(item => item.map?.image instanceof TestCanvas)
+        : receiver.material;
+      const image = material.map.image;
+      const colors = new Set();
+      for (let y = Math.floor(image.height * 0.2); y < Math.ceil(image.height * 0.8); y++) {
+        for (let x = Math.floor(image.width * 0.2); x < Math.ceil(image.width * 0.8); x++) {
+          const offset = (y * image.width + x) * 4;
+          colors.add(`${image.pixels[offset]},${image.pixels[offset + 1]},${image.pixels[offset + 2]}`);
+        }
+      }
+      assert.equal(colors.size, 1,
+        `${mode} projection produced seam colors: ${[...colors].join('; ')}`);
+    }
   } finally {
     globalThis.document = previousDocument;
   }

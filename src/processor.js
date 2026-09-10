@@ -502,7 +502,10 @@ export function collectSurfaceComponents(rootObject) {
         records: [],
       };
 
-      const edgeCounts = new Map();
+      // Track distinct geometric faces per edge. Some authored sheets contain
+      // coincident front/back triangles; counting raw incidences would mistake
+      // their doubled outer rim for an internal edge.
+      const edgeTriangles = new Map();
       const position = mesh.geometry.attributes.position;
       mesh.geometry.computeBoundingBox();
       const localSize = mesh.geometry.boundingBox.getSize(new THREE.Vector3());
@@ -517,12 +520,19 @@ export function collectSurfaceComponents(rootObject) {
 
         const ids = [0, 1, 2].map(c => triangleVertexIndex(mesh.geometry, triangleIndex, c));
         const keys = ids.map(i => surfacePositionKey(position, i, inverseTolerance));
+        const triangleKey = [...keys].sort().join('|');
+        record.edgeKeys = [];
         for (const [a, b] of [[0, 1], [1, 2], [2, 0]]) {
           const edge = keys[a] < keys[b] ? `${keys[a]}|${keys[b]}` : `${keys[b]}|${keys[a]}`;
-          edgeCounts.set(edge, (edgeCounts.get(edge) || 0) + 1);
+          record.edgeKeys.push(edge);
+          if (!edgeTriangles.has(edge)) edgeTriangles.set(edge, new Set());
+          edgeTriangles.get(edge).add(triangleKey);
         }
       }
-      descriptor.boundaryEdges = [...edgeCounts.values()].filter(count => count === 1).length;
+      for (const record of descriptor.records) {
+        record.boundaryEdgeFlags = record.edgeKeys.map(edge => edgeTriangles.get(edge)?.size === 1);
+      }
+      descriptor.boundaryEdges = [...edgeTriangles.values()].filter(triangles => triangles.size === 1).length;
       descriptor.hasTexture = [...descriptor.materials].some(mat => Boolean(mat?.map || mat?.alphaMap));
       components.push(descriptor);
     });
@@ -842,6 +852,29 @@ function interpolateRecordUv(record, barycentric) {
   );
 }
 
+function barycentricTouchesOuterBoundary(record, barycentric, epsilon = 1e-5) {
+  const boundary = record.boundaryEdgeFlags;
+  if (!boundary) {
+    return Math.min(barycentric.x, barycentric.y, barycentric.z) <= epsilon;
+  }
+  // Barycentric component 0 is opposite edge 1-2, component 1 is
+  // opposite edge 2-0, and component 2 is opposite edge 0-1.
+  return (barycentric.x <= epsilon && boundary[1]) ||
+    (barycentric.y <= epsilon && boundary[2]) ||
+    (barycentric.z <= epsilon && boundary[0]);
+}
+
+function nearestInteriorProjectionHit(sourceBvh, point, maxDistance = Infinity) {
+  const nearest = nearestTriangleInBvh(sourceBvh, point);
+  if (!nearest.record || Math.sqrt(nearest.distanceSq) > maxDistance) return null;
+  const barycentric = nearest.record.triangle.getBarycoord(nearest.point, new THREE.Vector3());
+  // A closest point on the decal's true outer rim is outside its footprint.
+  // A closest point on a shared triangle edge is still inside the sheet and
+  // must remain eligible, otherwise mesh tessellation appears as pinholes.
+  if (barycentricTouchesOuterBoundary(nearest.record, barycentric)) return null;
+  return { distance: Math.sqrt(nearest.distanceSq), record: nearest.record, point: nearest.point };
+}
+
 function prepareLocalProjection(source, receiverBvh) {
   const bindings = new Map();
   const gaps = [];
@@ -914,11 +947,15 @@ function localNormalProjectionHit(point, receiverNormal, sourceBvh, projection) 
     projectedPoint.copy(point).addScaledVector(localNormal, signedDistance);
     record.triangle.getBarycoord(projectedPoint, barycentric);
     if (Math.min(barycentric.x, barycentric.y, barycentric.z) < -1e-5) continue;
+    if (barycentricTouchesOuterBoundary(record, barycentric, 0)) continue;
     if (!best || distance < best.distance) {
       best = { distance, record, point: projectedPoint.clone() };
     }
   }
-  return best;
+  // Faceted normals on a curved sheet can leave sub-pixel wedges between two
+  // adjacent triangle projections. Nearest-point fallback fills only internal
+  // seams; the real outer boundary remains excluded by its topology flags.
+  return best || nearestInteriorProjectionHit(sourceBvh, point, projection.maxDistance);
 }
 
 function projectionHit(point, receiverNormal, source, sourceBvh, mode, localProjection) {
@@ -950,14 +987,7 @@ function projectionHit(point, receiverNormal, source, sourceBvh, mode, localProj
     }
   }
   if (best) return best;
-
-  const nearest = nearestTriangleInBvh(sourceBvh, point);
-  if (!nearest.record) return null;
-  const barycentric = nearest.record.triangle.getBarycoord(nearest.point, new THREE.Vector3());
-  // Nearest points outside a projected decal footprint land on an edge. Only
-  // accept an interior closest-point projection to avoid paint halos.
-  if (Math.min(barycentric.x, barycentric.y, barycentric.z) <= 1e-5) return null;
-  return { distance: Math.sqrt(nearest.distanceSq), record: nearest.record, point: nearest.point };
+  return nearestInteriorProjectionHit(sourceBvh, point);
 }
 
 function configureLocalizedBakedTexture(source, target) {
@@ -1385,10 +1415,10 @@ export async function bakeFloatingDecals(rootObject, selections, {
       // instead of occupying only a few pixels in the full-body atlas.
       for (const chartRecords of splitIntoUvCharts(imageRecords)) {
         for (const layerRecords of splitIntoNonOverlappingUvLayers(chartRecords)) {
-          const couldReceiveDecal = layerRecords.some(record =>
-            usableEntries.some(entry => triangleOverlapsProjectionFootprint(record, entry.footprint))
+          const chartEntries = usableEntries.filter(entry =>
+            layerRecords.some(record => triangleOverlapsProjectionFootprint(record, entry.footprint))
           );
-          if (!couldReceiveDecal) continue;
+          if (chartEntries.length === 0) continue;
 
           const chartBounds = chartImageBounds(layerRecords);
           localizeChartUvs(layerRecords, chartBounds);
@@ -1418,6 +1448,11 @@ export async function bakeFloatingDecals(rootObject, selections, {
             context,
             imageData: context.getImageData(0, 0, width, height),
             coverageMask: new Uint8Array(width * height),
+            paintedMasks: new Map(chartEntries.map(entry => [
+              entry,
+              new Uint8Array(width * height),
+            ])),
+            entries: chartEntries,
             chartBounds,
             pixels: 0,
           });
@@ -1439,7 +1474,7 @@ export async function bakeFloatingDecals(rootObject, selections, {
       );
 
       for (const record of state.records) {
-        const eligibleEntries = usableEntries.filter(entry =>
+        const eligibleEntries = state.entries.filter(entry =>
           triangleOverlapsProjectionFootprint(record, entry.footprint)
         );
         const localReceiverNormal = record.faceNormal || record.normal;
@@ -1468,13 +1503,19 @@ export async function bakeFloatingDecals(rootObject, selections, {
               record.uvs[0].x * w0 + record.uvs[1].x * w1 + record.uvs[2].x * w2,
               record.uvs[0].y * w0 + record.uvs[1].y * w1 + record.uvs[2].y * w2
             );
-            const baseSample = state.baseSampler?.(originalUv) || [255, 255, 255, 255];
+            const pixelIndex = y * state.canvas.width + x;
             const offset = (y * state.canvas.width + x) * 4;
-            state.imageData.data[offset] = baseSample[0];
-            state.imageData.data[offset + 1] = baseSample[1];
-            state.imageData.data[offset + 2] = baseSample[2];
-            state.imageData.data[offset + 3] = baseSample[3] ?? 255;
-            state.coverageMask[y * state.canvas.width + x] = 1;
+            // Neighboring UV triangles share edge texels. Initialize each
+            // texel once so a later triangle whose projection narrowly misses
+            // cannot erase a decal already painted by its neighbor.
+            if (!state.coverageMask[pixelIndex]) {
+              const baseSample = state.baseSampler?.(originalUv) || [255, 255, 255, 255];
+              state.imageData.data[offset] = baseSample[0];
+              state.imageData.data[offset + 1] = baseSample[1];
+              state.imageData.data[offset + 2] = baseSample[2];
+              state.imageData.data[offset + 3] = baseSample[3] ?? 255;
+              state.coverageMask[pixelIndex] = 1;
+            }
 
             if (eligibleEntries.length === 0) continue;
             point.set(0, 0, 0)
@@ -1484,6 +1525,8 @@ export async function bakeFloatingDecals(rootObject, selections, {
             receiverNormal.copy(localReceiverNormal);
 
             for (const entry of eligibleEntries) {
+              const paintedMask = state.paintedMasks.get(entry);
+              if (paintedMask?.[pixelIndex]) continue;
               const hit = projectionHit(
                 point,
                 receiverNormal,
@@ -1521,6 +1564,7 @@ export async function bakeFloatingDecals(rootObject, selections, {
                   : Math.round(Math.max(0, Math.min(1, blended)) * 255);
               }
               state.imageData.data[offset + 3] = 255;
+              if (paintedMask) paintedMask[pixelIndex] = 1;
               entry.pixels++;
               state.pixels++;
             }
