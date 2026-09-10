@@ -1700,6 +1700,63 @@ export function quantizePalette(image, k = 5) {
   return quantizePaletteFromSamples(samples, k);
 }
 
+// Texture processing keeps several byte-per-pixel buffers alive at once: the
+// canvas, ImageData, palette labels, and (when enabled) cleanup workspaces.
+// Use a coarse device-memory budget instead of silently imposing a fixed
+// dimension. The returned sizes always preserve the source aspect ratio.
+const TEXTURE_PROCESSING_BYTES_PER_PIXEL = 16;
+const MAX_SAFE_CANVAS_DIMENSION = 16384;
+
+function defaultTextureProcessingPixelBudget() {
+  const deviceMemoryGb = typeof navigator !== 'undefined' && Number.isFinite(navigator.deviceMemory)
+    ? navigator.deviceMemory
+    : 4;
+  let budgetMb = 256;
+  if (deviceMemoryGb <= 2) budgetMb = 128;
+  else if (deviceMemoryGb >= 16) budgetMb = 768;
+  else if (deviceMemoryGb >= 8) budgetMb = 512;
+  return Math.floor((budgetMb * 1024 * 1024) / TEXTURE_PROCESSING_BYTES_PER_PIXEL);
+}
+
+/**
+ * Plans proportional working sizes for a set of textures under one shared
+ * memory budget. Full source resolution is retained whenever it fits.
+ */
+export function planTextureWorkingSizes(
+  sources,
+  { maxPixels = defaultTextureProcessingPixelBudget(), maxDimension = MAX_SAFE_CANVAS_DIMENSION } = {}
+) {
+  const normalized = (sources || []).map(source => ({
+    width: Math.max(1, Math.floor(Number(source?.width) || 1)),
+    height: Math.max(1, Math.floor(Number(source?.height) || 1)),
+  }));
+  if (normalized.length === 0) return [];
+
+  const safeMaxPixels = Math.max(1, Number(maxPixels) || 1);
+  const safeMaxDimension = Math.max(1, Number(maxDimension) || 1);
+  const totalPixels = normalized.reduce((sum, size) => sum + size.width * size.height, 0);
+  const sharedScale = Math.min(1, Math.sqrt(safeMaxPixels / Math.max(1, totalPixels)));
+
+  return normalized.map(source => {
+    const dimensionScale = Math.min(
+      1,
+      safeMaxDimension / source.width,
+      safeMaxDimension / source.height
+    );
+    const scale = Math.min(sharedScale, dimensionScale);
+    const width = Math.max(1, Math.round(source.width * scale));
+    const height = Math.max(1, Math.round(source.height * scale));
+    return {
+      sourceWidth: source.width,
+      sourceHeight: source.height,
+      width,
+      height,
+      scale,
+      downsampled: width !== source.width || height !== source.height,
+    };
+  });
+}
+
 /**
  * Fast 5-bit RGB Lookup Table that maps RGB -> palette index (0..k-1).
  */
@@ -1959,21 +2016,29 @@ export function applyLiveColorQuantization(
 
   // 2. Apply this unified palette to all textured materials
   const indexLut = createIndexLUT(extractedPalette);
+  const resolutionPlan = planTextureWorkingSizes(texturedMaterials.map(mat => ({
+    width: mat._originalMap.image.width,
+    height: mat._originalMap.image.height,
+  })));
+  rootObject._textureResolutionInfo = [];
 
-  for (const mat of texturedMaterials) {
+  for (let materialIndex = 0; materialIndex < texturedMaterials.length; materialIndex++) {
+    const mat = texturedMaterials[materialIndex];
     mat._quantizedPalette = extractedPalette;
 
     if (!enabled) {
       mat.map = mat._originalMap;
       mat._quantizationEnabled = false;
+      mat._textureProcessingResolution = null;
       mat.needsUpdate = true;
       continue;
     }
 
     const origImage = mat._originalMap.image;
+    const plannedSize = resolutionPlan[materialIndex];
     const canvas = document.createElement('canvas');
-    canvas.width = Math.min(2048, origImage.width || 2048);
-    canvas.height = Math.min(2048, origImage.height || 2048);
+    canvas.width = plannedSize.width;
+    canvas.height = plannedSize.height;
     const W = canvas.width;
     const H = canvas.height;
 
@@ -2022,6 +2087,8 @@ export function applyLiveColorQuantization(
     mat._quantizedLabelsWidth = W;
     mat._quantizedLabelsHeight = H;
     mat._quantizationEnabled = true;
+    mat._textureProcessingResolution = plannedSize;
+    rootObject._textureResolutionInfo.push(plannedSize);
     mat.needsUpdate = true;
   }
 
@@ -2128,14 +2195,23 @@ export async function exportMultiColor3MF(
 
   // Build a color sampler for each material
   const materialSamplers = new Map();
+  const samplerMaterials = allMats.filter(m => m._originalMap?.image || m.map?.image);
+  const samplerResolutionPlan = planTextureWorkingSizes(samplerMaterials.map(m => {
+    const image = m._originalMap?.image || m.map?.image;
+    return { width: image.width, height: image.height };
+  }));
+  const samplerResolutionByMaterial = new Map(
+    samplerMaterials.map((material, index) => [material, samplerResolutionPlan[index]])
+  );
   for (const m of allMats) {
     const img = m._originalMap?.image || m.map?.image;
     if (img) {
       let canvas = m._quantizedCanvas;
       if (!canvas || !isQuantizeEnabled) {
+        const plannedSize = samplerResolutionByMaterial.get(m);
         canvas = document.createElement('canvas');
-        canvas.width = Math.min(2048, img.width || 2048);
-        canvas.height = Math.min(2048, img.height || 2048);
+        canvas.width = plannedSize.width;
+        canvas.height = plannedSize.height;
         const W = canvas.width;
         const H = canvas.height;
         const ctx = canvas.getContext('2d');
@@ -2156,6 +2232,7 @@ export async function exportMultiColor3MF(
           d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2];
         }
         ctx.putImageData(imgData, 0, 0);
+        m._textureProcessingResolution = plannedSize;
       }
 
       const ctx = canvas.getContext('2d');
@@ -2658,11 +2735,15 @@ export function getModelTextures(rootObject) {
       const mats = Array.isArray(child.material) ? child.material : [child.material];
       for (const mat of mats) {
         if (mat && mat.map && !textures.has(mat.map)) {
+          const resolution = mat._textureProcessingResolution;
           textures.set(mat.map, {
             slot: 'BaseColor',
             width: mat.map.image?.width || 0,
             height: mat.map.image?.height || 0,
-            mimeType: 'image/png'
+            mimeType: 'image/png',
+            sourceWidth: resolution?.sourceWidth || mat.map.image?.width || 0,
+            sourceHeight: resolution?.sourceHeight || mat.map.image?.height || 0,
+            downsampled: resolution?.downsampled || false,
           });
         }
       }

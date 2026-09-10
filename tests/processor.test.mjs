@@ -1,6 +1,42 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyUvFlip, extractGlbImages } from '../src/processor.js';
+import { applyUvFlip, extractGlbImages, planTextureWorkingSizes } from '../src/processor.js';
+
+test('texture working-size planner preserves full source resolution within budget', () => {
+  const [size] = planTextureWorkingSizes(
+    [{ width: 4096, height: 1024 }],
+    { maxPixels: 4096 * 1024, maxDimension: 16384 }
+  );
+  assert.deepEqual(size, {
+    sourceWidth: 4096,
+    sourceHeight: 1024,
+    width: 4096,
+    height: 1024,
+    scale: 1,
+    downsampled: false,
+  });
+});
+
+test('texture working-size planner reduces proportionally when over budget', () => {
+  const [size] = planTextureWorkingSizes(
+    [{ width: 4096, height: 1024 }],
+    { maxPixels: 2048 * 512, maxDimension: 16384 }
+  );
+  assert.equal(size.width, 2048);
+  assert.equal(size.height, 512);
+  assert.equal(size.scale, 0.5);
+  assert.equal(size.downsampled, true);
+});
+
+test('texture working-size planner shares its pixel budget across textures', () => {
+  const sizes = planTextureWorkingSizes(
+    [{ width: 2048, height: 2048 }, { width: 2048, height: 2048 }],
+    { maxPixels: 2048 * 2048, maxDimension: 16384 }
+  );
+  assert.ok(sizes.every(size => size.width === size.height));
+  assert.ok(sizes.every(size => size.width < 2048));
+  assert.ok(sizes.reduce((sum, size) => sum + size.width * size.height, 0) <= 2048 * 2048 + 4096);
+});
 
 test('applyUvFlip correctly inverts Y coordinates and restores original on unflip', () => {
   // Simulate Three.js mesh geometry structure

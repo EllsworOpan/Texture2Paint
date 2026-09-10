@@ -985,6 +985,10 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .proc-texture-dim.reduced {
+      color: var(--warn);
+    }
+
     .proc-texture-fmt {
       text-transform: uppercase;
       background: rgba(108, 138, 255, .12);
@@ -2119,10 +2123,13 @@
         const item = document.createElement('div');
         item.className = 'proc-texture-item';
         const cleanMime = (t.mimeType || 'embedded').replace('image/', '');
+        const dimensions = t.downsampled
+          ? `${t.sourceWidth}×${t.sourceHeight} → ${t.width}×${t.height}`
+          : (t.width ? `${t.width}×${t.height}` : 'active');
         item.innerHTML = `
       <span class="proc-texture-slot">${t.slot}</span>
       <div class="proc-texture-meta">
-        <span class="proc-texture-dim">${t.width ? `${t.width}×${t.height}` : 'active'}</span>
+        <span class="proc-texture-dim${t.downsampled ? ' reduced' : ''}"${t.downsampled ? ' title="Reduced proportionally to stay within the browser processing memory budget"' : ''}>${dimensions}</span>
         <span class="proc-texture-fmt">${cleanMime}</span>
       </div>
     `;
