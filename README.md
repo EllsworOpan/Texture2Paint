@@ -1,6 +1,6 @@
 # Texture2Paint
 
-Browser-based 3D model converter, texture-to-palette quantizer, and multi-color 3D printing prep tool. Drop in any textured 3D model, simplify its texture into discrete filament colors with live 3D preview, clean up noise and boundaries, and export directly as a multi-color **`.3mf`** for **PrusaSlicer**, **Bambu Studio**, and **OrcaSlicer**—or convert between common 3D formats.
+Browser-based 3D model converter, texture-to-palette quantizer, and multi-color 3D printing prep tool. Drop in a model with authored textures, vertex colors, or material colors; simplify it into discrete filament colors with live 3D preview; clean up noise and boundaries; and export a painted **`.3mf`** for slicers that understand Prusa/Bambu-style triangle paint data.
 
 **Live Demo:** `https://EllsworOpan.github.io/Texture2Paint/`
 
@@ -23,7 +23,7 @@ Textured 3D models (from 3D scanners, photogrammetry, game assets, or digital sc
 
 ### 🎨 Color Quantization & Custom Palette Tools
 - **Adjustable Palette Size:** Use the slider or enter any exact number of colors (e.g., 2, 4, 7, 9, 12).
-- **Real-Time 3D Viewport Preview:** Quantization is accelerated by an in-memory 5-bit 3D Color LUT for smooth, interactive 60 FPS slider adjustments.
+- **Real-Time 3D Viewport Preview:** Quantization uses an in-memory 5-bit 3D Color LUT and supports base-color textures, material colors, vertex colors, and instance colors.
 - **Interactive Swatch Editor & Eyedropper:** Click any color chip to open a color picker. Toggle quantization off to inspect the original texture and use your browser's eyedropper tool to sample colors directly from the 3D model.
 - **Persistent Memory:** Toggling quantization on/off or expanding/trimming the color count preserves your custom color choices without resetting your work.
 - **Dedicated Resample Button:** Recompute the coverage-aware perceptual palette only when you explicitly request it.
@@ -31,24 +31,25 @@ Textured 3D models (from 3D scanners, photogrammetry, game assets, or digital sc
 ### 🧹 Texture & Contour Cleanup
 - **Despeckle (Min Island Filter):** Connected-component filter that removes stray dots and color speckles smaller than your chosen pixel threshold (e.g. 50–500 px), merging them into surrounding colors to eliminate wasteful filament purge switches.
 - **Boundary Smoothing:** Majority mode filter that smooths stair-stepped, pixelated color borders into clean contours and rounds out circular features (like eyes).
-- **UV Orientation Control:** Lossless vertical UV inversion (`V = 1.0 - V`) toggle with live viewport updates.
 
 ### 🪄 Floating Decal Projection
 - **Geometry-Aware Detection:** Finds disconnected, textured, zero-thickness surface components and ranks their likely receiving surfaces without relying on mesh or texture names.
 - **Review Before Baking:** High-confidence sheets are selected automatically; ambiguous components remain available for manual source and receiver selection.
 - **Curved-Surface Projection:** Surface-conforming mode follows each decal triangle's local plane and normal instead of forcing one direction through a curved sheet. Manual sheet-normal, receiver-normal, and closest-surface modes remain available. Affected continuous UV charts are remapped into dedicated high-resolution textures before compositing, preserving crisp decal detail without introducing per-triangle seams; genuinely overlapping UV layers remain isolated.
-- **Clean WYSIWYG Output:** Successfully baked sheets are physically removed from the processed model. GLB, glTF, OBJ, STL, PLY, USDZ, and 3MF exporters all consume the same visible model snapshot, so backup geometry and hidden decal nodes are not serialized.
+- **Clean WYSIWYG Output:** Successfully baked sheets are physically removed from the processed model. Exporters consume the same visible model snapshot, and the 3MF exporter explicitly excludes hidden geometry from both bounds and mesh output.
 
 ### 🖨️ Slicer-Ready Multi-Material 3MF Export
 - **Native AMS & MMU Segmentation:** Writes `<m:colorgroup>`, `slic3rpe:mmu_segmentation`, and `paint_color` attributes directly onto the mesh.
 - **Feature-Aware Boundary Tracing:** Converts quantized texel boundaries into shared mesh contours instead of uniformly resampling the surface. Boundary Accuracy defaults to `0` for an exact processed texel outline; larger values opt into contour simplification with per-face paint-preservation checks.
-- **Watertight Manifold Topology (Zero Cracks):** Traces colors with original UVs first, propagates contour intersections across shared edges, then welds coincident vertices along UV seams into shared indices. Eliminates the non-manifold open-edge errors common with multi-body converters.
+- **Seam-Safe Topology:** Traces colors with the texture's selected UV channel, propagates contour intersections across shared edges, then welds coincident vertices along UV seams. It preserves manifold input topology but is intentionally not a general mesh-repair tool.
+- **Complete Authored Color Inputs:** Combines base-color texture alpha, alpha-map green, opacity, alpha test, vertex RGBA, material color, and instance color when assigning printable regions.
+- **Static Scene Bake:** Exports visible instances and the current morph/skinned pose, respects draw ranges, and corrects mirrored winding. Unsupported batched geometry and shader-defined surface color are rejected with an actionable error.
 - **Z-Up Print Bed Alignment:** Automatically transforms models from Y-Up (web) to Z-Up (slicers) and grounds the lowest point flat to the build plate at $Z = 0$.
 - **Configurable Scale:** Normalizes the model to your desired build size (default 150 mm) so it loads into your slicer at **100% scale** with no scaling warnings.
 
-### 🌐 Universal 3D Viewer & Multi-Format Converter
-- **Wide Import Support:** Accepts `.glb`, `.gltf`, `.obj`, `.stl`, `.ply`, `.dae`, `.3mf`, and `.fbx`.
-- **Multi-Format Export:** Export your model as `.3mf` (Multi-Material), `.glb` (with embedded quantized or original textures), `.gltf`, `.obj`, `.stl`, `.ply`, or `.usdz`.
+### 🌐 3D Viewer & Multi-Format Converter
+- **Color-Aware Import Support:** Accepts `.meshy`, `.glb`, `.gltf`, `.obj`, `.ply`, `.dae`, and `.fbx`, directly or in `.zip`. A ZIP with alternate model formats loads one preferred model rather than overlaying duplicates. Models without authored color information are rejected.
+- **Multi-Format Export:** Export as `.3mf` (painted multi-material), `.glb` (Automatic, PNG, or JPEG embedded texture encoding), `.gltf`, `.obj`, `.stl`, `.ply`, or `.usdz`. JPEG is blocked when it would discard transparency.
 - **Interactive Viewport:** Orbit controls, exposure, environment intensity, ambient/directional lighting controls, wireframe mode, and dark/grey/white/black background presets.
 
 ---
@@ -57,12 +58,12 @@ Textured 3D models (from 3D scanners, photogrammetry, game assets, or digital sc
 
 | Format | Import | Export | Notes |
 | :--- | :---: | :---: | :--- |
-| **3MF** | ✅ | ✅ | Multi-material assembly with native Prusa/Bambu paint data |
+| **3MF** | ❌ | ✅ | Painted output with native Prusa/Bambu triangle paint data |
 | **GLB** | ✅ | ✅ | Binary glTF; embeds quantized canvas texture when enabled |
 | **glTF** | ✅ | ✅ | JSON glTF with external buffer/image support |
 | **OBJ** | ✅ | ✅ | Wavefront OBJ with material and vertex coordinate export |
-| **STL** | ✅ | ✅ | Binary STL for standard single-color slicing |
-| **PLY** | ✅ | ✅ | Polygon file format |
+| **STL** | ❌ | ✅ | Colorless mesh export only |
+| **PLY** | ✅ | ✅ | Vertex-colored PLY is supported on import |
 | **USDZ** | ❌ | ✅ | Apple AR / iOS QuickLook format |
 | **FBX** | ✅ | ❌ | Autodesk FBX import |
 | **DAE** | ✅ | ❌ | Collada format import |
@@ -103,7 +104,7 @@ Open `http://localhost:8080` in your browser.
    * Adjust **Boundary Smoothing** (e.g., `Level 2`) to round circular features like eyes and sharpen shell margins.
 5. **Set Size:** Enter your desired **Target Print Size** (e.g., `150` mm).
 6. **Export:** Set the top bar export dropdown to **`3MF (PrusaSlicer Multi-Color)`** and click **Export**.
-7. **Slice:** Drop the `.3mf` into **PrusaSlicer**, **Bambu Studio**, or **OrcaSlicer**. The model will load onto the bed standing upright, at 100% scale, with zero non-manifold cracks and all colors assigned to separate filament slots.
+7. **Slice:** Drop the `.3mf` into a compatible slicer such as **PrusaSlicer**, **Bambu Studio**, or **OrcaSlicer**. The model loads Z-up at the requested size, with its palette regions assigned to filament slots. Mesh defects already present in the source remain outside this app's scope.
 
 ---
 

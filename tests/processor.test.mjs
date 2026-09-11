@@ -5,7 +5,9 @@ import { strFromU8, unzipSync } from 'fflate';
 import {
   applyLiveColorQuantization,
   applyUvFlip,
+  analyzeModelColorSources,
   exportMultiColor3MF,
+  exportProcessedGlb,
   extractGlbImages,
   planTextureWorkingSizes,
   quantizePaletteFromSamples,
@@ -77,6 +79,51 @@ test('live quantization supports models made only from solid material colors', (
     root.children.map(mesh => mesh.material.color.getHex()),
     sourceHexes
   );
+});
+
+test('model color analysis distinguishes authored color from fallback white geometry', () => {
+  const fallbackMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  fallbackMaterial._texture2PaintFallback = true;
+  const colorless = new THREE.Group();
+  colorless.add(new THREE.Mesh(new THREE.BoxGeometry(), fallbackMaterial));
+  assert.equal(analyzeModelColorSources(colorless).hasAuthoredColor, false);
+
+  const vertexColored = colorless.clone();
+  vertexColored.children[0].geometry = vertexColored.children[0].geometry.clone();
+  vertexColored.children[0].geometry.setAttribute('color', new THREE.Float32BufferAttribute(
+    new Array(vertexColored.children[0].geometry.attributes.position.count * 3).fill(0.5), 3
+  ));
+  assert.equal(analyzeModelColorSources(vertexColored).hasAuthoredColor, true);
+
+  const solid = new THREE.Group();
+  solid.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial({ color: 0x336699 })));
+  assert.equal(analyzeModelColorSources(solid).hasAuthoredColor, true);
+});
+
+test('live quantization keeps vertex-color base factors and installs palette preview shader', () => {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    0, 0, 0, 1, 0, 0, 0, 1, 0,
+  ], 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute([
+    1, 0, 0, 0, 0, 1, 0, 1, 0,
+  ], 3));
+  const material = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true });
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(geometry, material));
+
+  applyLiveColorQuantization(root, 2, true, [[255, 0, 0], [0, 0, 255]]);
+  assert.equal(material.color.getHex(), 0xffffff);
+  assert.equal(material._vertexQuantizationEnabled, true);
+  const shader = {
+    uniforms: {},
+    fragmentShader: '#include <color_fragment>',
+  };
+  material.onBeforeCompile(shader);
+  assert.match(shader.fragmentShader, /texture2PaintPalette/);
+
+  applyLiveColorQuantization(root, 2, false, [[255, 0, 0], [0, 0, 255]]);
+  assert.equal(material._vertexQuantizationEnabled, false);
 });
 
 test('surface color sampling composes texture tint and weights by model area', () => {
@@ -274,6 +321,172 @@ function inspectPaintMesh(modelXml) {
   }
   return { vertices, triangles, areaByColor, edgeUses };
 }
+
+test('3MF export excludes hidden meshes from geometry and output bounds', async () => {
+  const root = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+  root.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), material));
+  const hidden = new THREE.Mesh(new THREE.BoxGeometry(100, 100, 100), material);
+  hidden.visible = false;
+  root.add(hidden);
+  root._quantizedPalette = [[255, 0, 0], [0, 0, 0]];
+
+  const modelXml = await exportedModelXml(root, 0);
+  const mesh = inspectPaintMesh(modelXml);
+  assert.equal(mesh.triangles.length, 12);
+  const xs = mesh.vertices.map(vertex => vertex[0]);
+  assert.ok(Math.max(...xs) - Math.min(...xs) <= 10.000001);
+});
+
+test('3MF export bakes every InstancedMesh transform', async () => {
+  const geometry = new THREE.BoxGeometry(1, 1, 1);
+  const material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+  const instances = new THREE.InstancedMesh(geometry, material, 2);
+  instances.setMatrixAt(0, new THREE.Matrix4().makeTranslation(-2, 0, 0));
+  instances.setMatrixAt(1, new THREE.Matrix4().makeTranslation(2, 0, 0));
+  const root = new THREE.Group();
+  root.add(instances);
+  root._quantizedPalette = [[255, 0, 0], [0, 0, 0]];
+
+  const modelXml = await exportedModelXml(root, 0);
+  assert.equal(inspectPaintMesh(modelXml).triangles.length, 24);
+});
+
+test('3MF export rejects shader-defined surface color instead of silently mispainting it', async () => {
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.ShaderMaterial({
+    vertexShader: 'void main(){gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+    fragmentShader: 'void main(){gl_FragColor=vec4(1.0);}',
+  })));
+  root._quantizedPalette = [[255, 255, 255], [0, 0, 0]];
+  await assert.rejects(exportedModelXml(root, 0), /Custom shader materials/i);
+});
+
+test('3MF export converts vertex-color gradients into palette-painted regions', async () => {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    0, 0, 0, 1, 0, 0, 0, 1, 0,
+  ], 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute([
+    1, 0, 0, 0, 0, 1, 0, 0, 1,
+  ], 3));
+  const material = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true });
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(geometry, material));
+  root._quantizedPalette = [[255, 0, 0], [0, 0, 255]];
+
+  const modelXml = await exportedModelXml(root, 0);
+  const mesh = inspectPaintMesh(modelXml);
+  assert.ok(mesh.triangles.length > 1);
+  assert.deepEqual(new Set(mesh.triangles.map(triangle => triangle[3])), new Set([1, 2]));
+});
+
+test('3MF export samples a base-color texture from its selected UV channel', async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([0, 1]), 2, 1);
+  const geometry = root.children[0].geometry;
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(new Array(8).fill(0), 2));
+  geometry.setAttribute('uv1', new THREE.Float32BufferAttribute([
+    0, 0, 1, 0, 1, 1, 0, 1,
+  ], 2));
+  root.children[0].material.map.channel = 1;
+  root.children[0].material._originalMap.channel = 1;
+
+  const modelXml = await exportedModelXml(root, 0);
+  assert.deepEqual(new Set(inspectPaintMesh(modelXml).triangles.map(triangle => triangle[3])), new Set([1, 2]));
+});
+
+test('3MF export combines alphaMap green with material opacity and its UV channel', async () => {
+  const originalDocument = globalThis.document;
+  const pixels = new Uint8ClampedArray([
+    255, 0, 255, 255,
+    255, 255, 255, 255,
+  ]);
+  globalThis.document = {
+    createElement() {
+      return {
+        width: 0,
+        height: 0,
+        getContext: () => ({
+          drawImage() {},
+          getImageData: () => ({ data: new Uint8ClampedArray(pixels) }),
+        }),
+      };
+    },
+  };
+  try {
+    const geometry = new THREE.PlaneGeometry(1, 1);
+    geometry.setAttribute('uv1', geometry.getAttribute('uv').clone());
+    geometry.getAttribute('uv').array.fill(0);
+    const alphaMap = new THREE.Texture({ width: 2, height: 1 });
+    alphaMap.flipY = false;
+    alphaMap.channel = 1;
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xff0000,
+      alphaMap,
+      alphaTest: 0.25,
+      opacity: 0.75,
+    });
+    const root = new THREE.Group();
+    root.add(new THREE.Mesh(geometry, material));
+    root._quantizedPalette = [[255, 0, 0], [0, 0, 0]];
+
+    const modelXml = await exportedModelXml(root, 0);
+    const totalArea = [...inspectPaintMesh(modelXml).areaByColor.values()]
+      .reduce((sum, area) => sum + area, 0);
+    assert.ok(Math.abs(totalArea - 50) < 1e-6, `expected half the surface area, received ${totalArea}`);
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
+test('3MF export applies base-map and vertex alpha cutouts', async () => {
+  const makeRoot = (rgba, withVertexAlpha = false) => {
+    const canvas = {
+      width: 2,
+      height: 1,
+      getContext: () => ({ getImageData: () => ({ data: new Uint8ClampedArray(rgba) }) }),
+    };
+    const texture = new THREE.Texture({ width: 2, height: 1 });
+    texture.flipY = false;
+    const material = new THREE.MeshBasicMaterial({ map: texture, alphaTest: 0.5 });
+    const geometry = new THREE.PlaneGeometry(1, 1);
+    if (withVertexAlpha) {
+      material.vertexColors = true;
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute([
+        1, 1, 1, 0,
+        1, 1, 1, 1,
+        1, 1, 1, 0,
+        1, 1, 1, 1,
+      ], 4));
+    }
+    material._originalMap = texture;
+    material._quantizedCanvas = canvas;
+    material._quantizedLabels = new Uint8Array([0, 0]);
+    material._quantizedLabelsWidth = 2;
+    material._quantizedLabelsHeight = 1;
+    material._quantizationEnabled = true;
+    const root = new THREE.Group();
+    root.add(new THREE.Mesh(geometry, material));
+    root._quantizedPalette = [[255, 255, 255], [0, 0, 0]];
+    return root;
+  };
+
+  const baseAlphaRoot = makeRoot([
+    255, 255, 255, 0,
+    255, 255, 255, 255,
+  ]);
+  const baseAlphaArea = [...inspectPaintMesh(await exportedModelXml(baseAlphaRoot, 0)).areaByColor.values()]
+    .reduce((sum, area) => sum + area, 0);
+  assert.ok(Math.abs(baseAlphaArea - 50) < 1e-6);
+
+  const vertexAlphaRoot = makeRoot([
+    255, 255, 255, 255,
+    255, 255, 255, 255,
+  ], true);
+  const vertexAlphaArea = [...inspectPaintMesh(await exportedModelXml(vertexAlphaRoot, 0)).areaByColor.values()]
+    .reduce((sum, area) => sum + area, 0);
+  assert.ok(vertexAlphaArea > 0 && vertexAlphaArea < 100);
+});
 
 test('texture working-size planner preserves full source resolution within budget', () => {
   const [size] = planTextureWorkingSizes(
@@ -627,6 +840,30 @@ test('applyUvFlip correctly inverts Y coordinates and restores original on unfli
   assert.ok(Math.abs(mockMesh.geometry.attributes.uv.array[3] - 0.7) < 1e-5);
   assert.ok(Math.abs(mockMesh.geometry.attributes.uv.array[5] - 0.0) < 1e-5);
   assert.ok(Math.abs(mockMesh.geometry.attributes.uv.array[7] - 1.0) < 1e-5);
+});
+
+test('processed GLB export applies the requested embedded texture MIME type', async () => {
+  let exportedScene = null;
+  class FakeExporter {
+    parse(scene, resolve) {
+      exportedScene = scene;
+      resolve(new ArrayBuffer(8));
+    }
+  }
+  const texture = new THREE.Texture({ width: 1, height: 1 });
+  const material = new THREE.MeshBasicMaterial({ map: texture });
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(new THREE.BoxGeometry(), material));
+
+  await exportProcessedGlb(root, { GLTFExporter: FakeExporter, textureFormat: 'png' });
+  assert.equal(exportedScene.children[0].material.map.userData.mimeType, 'image/png');
+  assert.equal(texture.userData.mimeType, undefined, 'source texture must remain untouched');
+
+  material.transparent = true;
+  await assert.rejects(
+    exportProcessedGlb(root, { GLTFExporter: FakeExporter, textureFormat: 'jpeg' }),
+    /cannot preserve transparency/i
+  );
 });
 
 test('extractGlbImages returns empty array on invalid or non-GLB buffers', () => {

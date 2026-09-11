@@ -1984,7 +1984,15 @@ function interpolatedTexturePixel(raster, geometry, i0, i1, i2, weights) {
   return [red, green, blue, alpha];
 }
 
-function effectiveSurfaceColor(material, geometry, indices, weights, mapRaster, alphaRaster) {
+function effectiveSurfaceColor(
+  material,
+  geometry,
+  indices,
+  weights,
+  mapRaster,
+  alphaRaster,
+  instanceColor = null
+) {
   const baseColor = material._originalColor || material.color || new THREE.Color(1, 1, 1);
   const linearColor = baseColor.clone();
   let alpha = material.opacity ?? 1;
@@ -2019,6 +2027,8 @@ function effectiveSurfaceColor(material, geometry, indices, weights, mapRaster, 
     }
   }
 
+  if (instanceColor) linearColor.multiply(instanceColor);
+
   const alphaPixel = interpolatedTexturePixel(
     alphaRaster, geometry, indices[0], indices[1], indices[2], weights
   );
@@ -2034,28 +2044,65 @@ function forEachRenderableTriangle(rootObject, callback) {
   const c = new THREE.Vector3();
   const ab = new THREE.Vector3();
   const ac = new THREE.Vector3();
+  const instanceMatrix = new THREE.Matrix4();
+  const worldMatrix = new THREE.Matrix4();
+  const instanceColor = new THREE.Color();
   rootObject.traverse(mesh => {
     if (!mesh.isMesh || !mesh.geometry || !isObjectVisible(mesh)) return;
+    if (mesh.isBatchedMesh) {
+      throw new Error('Batched meshes are not supported. Convert the model to ordinary mesh geometry before importing.');
+    }
     const geometry = mesh.geometry;
     const position = geometry.getAttribute('position');
     if (!position) return;
     const index = geometry.index;
     const triangleCount = Math.floor((index ? index.count : position.count) / 3);
-    for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++) {
-      const material = materialAt(mesh, triangleMaterialIndex(geometry, triangleIndex));
-      if (!material || material.visible === false) continue;
-      const indices = [
-        index ? index.getX(triangleIndex * 3) : triangleIndex * 3,
-        index ? index.getX(triangleIndex * 3 + 1) : triangleIndex * 3 + 1,
-        index ? index.getX(triangleIndex * 3 + 2) : triangleIndex * 3 + 2,
-      ];
-      mesh.getVertexPosition(indices[0], a).applyMatrix4(mesh.matrixWorld);
-      mesh.getVertexPosition(indices[1], b).applyMatrix4(mesh.matrixWorld);
-      mesh.getVertexPosition(indices[2], c).applyMatrix4(mesh.matrixWorld);
-      ab.subVectors(b, a);
-      ac.subVectors(c, a);
-      const area = ab.cross(ac).length() * 0.5;
-      if (area > 0 && Number.isFinite(area)) callback({ mesh, geometry, material, indices, area });
+    const drawStart = Math.max(0, Math.floor((geometry.drawRange?.start || 0) / 3));
+    const drawCount = Number.isFinite(geometry.drawRange?.count)
+      ? Math.max(0, Math.floor(geometry.drawRange.count / 3))
+      : triangleCount;
+    const drawEnd = Math.min(triangleCount, drawStart + drawCount);
+    const instanceCount = mesh.isInstancedMesh ? mesh.count : 1;
+    mesh.skeleton?.update?.();
+
+    for (let instanceIndex = 0; instanceIndex < instanceCount; instanceIndex++) {
+      if (mesh.isInstancedMesh) {
+        mesh.getMatrixAt(instanceIndex, instanceMatrix);
+        worldMatrix.multiplyMatrices(mesh.matrixWorld, instanceMatrix);
+      } else {
+        worldMatrix.copy(mesh.matrixWorld);
+      }
+      const reversesWinding = worldMatrix.determinant() < 0;
+      const tint = mesh.isInstancedMesh && mesh.instanceColor
+        ? (mesh.getColorAt(instanceIndex, instanceColor), instanceColor.clone())
+        : null;
+
+      for (let triangleIndex = drawStart; triangleIndex < drawEnd; triangleIndex++) {
+        const material = materialAt(mesh, triangleMaterialIndex(geometry, triangleIndex));
+        if (!material || material.visible === false) continue;
+        const indices = [
+          index ? index.getX(triangleIndex * 3) : triangleIndex * 3,
+          index ? index.getX(triangleIndex * 3 + 1) : triangleIndex * 3 + 1,
+          index ? index.getX(triangleIndex * 3 + 2) : triangleIndex * 3 + 2,
+        ];
+        if (reversesWinding) [indices[1], indices[2]] = [indices[2], indices[1]];
+        mesh.getVertexPosition(indices[0], a).applyMatrix4(worldMatrix);
+        mesh.getVertexPosition(indices[1], b).applyMatrix4(worldMatrix);
+        mesh.getVertexPosition(indices[2], c).applyMatrix4(worldMatrix);
+        ab.subVectors(b, a);
+        ac.subVectors(c, a);
+        const area = ab.cross(ac).length() * 0.5;
+        if (area > 0 && Number.isFinite(area)) callback({
+          mesh,
+          geometry,
+          material,
+          indices,
+          area,
+          positions: [a.clone(), b.clone(), c.clone()],
+          instanceColor: tint,
+          instanceIndex,
+        });
+      }
     }
   });
 }
@@ -2072,7 +2119,7 @@ export function sampleModelSurfaceColors(rootObject, {
   if (!rootObject) return [];
   rootObject.updateWorldMatrix(true, true);
   const states = new Map();
-  forEachRenderableTriangle(rootObject, ({ material, area }) => {
+  forEachRenderableTriangle(rootObject, ({ material, area, instanceColor }) => {
     let state = states.get(material);
     if (!state) {
       state = { material, area: 0, target: 0, generated: 0, traversedArea: 0, nextArea: 0 };
@@ -2114,7 +2161,7 @@ export function sampleModelSurfaceColors(rootObject, {
     return textureRasters.get(texture);
   };
   const samples = [];
-  forEachRenderableTriangle(rootObject, ({ geometry, material, indices, area }) => {
+  forEachRenderableTriangle(rootObject, ({ geometry, material, indices, area, instanceColor }) => {
     const state = states.get(material);
     const endArea = state.traversedArea + area;
     while (state.generated < state.target && state.nextArea <= endArea + Number.EPSILON) {
@@ -2129,7 +2176,8 @@ export function sampleModelSurfaceColors(rootObject, {
         indices,
         weights,
         rasterFor(material._originalMap || material.map),
-        rasterFor(material.alphaMap)
+        rasterFor(material.alphaMap),
+        instanceColor
       );
       if (sample) {
         // A material's minimum sample count is for color discovery only. Keep
@@ -2419,6 +2467,56 @@ function adjustPaletteSize(existingPalette, samples, targetCount) {
   return result;
 }
 
+function setVertexColorPaletteShader(material, palette, enabled) {
+  if (!material.vertexColors && !material._texture2PaintHasInstanceColor) return;
+  if (!material._texture2PaintShaderOriginal) {
+    material._texture2PaintShaderOriginal = {
+      onBeforeCompile: material.onBeforeCompile,
+      customProgramCacheKey: material.customProgramCacheKey,
+    };
+  }
+  const original = material._texture2PaintShaderOriginal;
+  if (!enabled) {
+    material.onBeforeCompile = original.onBeforeCompile;
+    material.customProgramCacheKey = original.customProgramCacheKey;
+    material._vertexQuantizationEnabled = false;
+    material.needsUpdate = true;
+    return;
+  }
+  const colors = palette.slice(0, 32).map(sample => {
+    const color = new THREE.Color();
+    color.setRGB(sample[0] / 255, sample[1] / 255, sample[2] / 255, THREE.SRGBColorSpace);
+    return color;
+  });
+  const cacheKey = palette.map(color => color.join(',')).join(';');
+  material.onBeforeCompile = shader => {
+    original.onBeforeCompile?.call(material, shader);
+    shader.uniforms.texture2PaintPalette = { value: colors };
+    shader.uniforms.texture2PaintPaletteCount = { value: colors.length };
+    shader.fragmentShader = `
+uniform vec3 texture2PaintPalette[32];
+uniform int texture2PaintPaletteCount;
+${shader.fragmentShader}`.replace('#include <color_fragment>', `
+#include <color_fragment>
+float texture2PaintBestDistance = 1e20;
+vec3 texture2PaintBestColor = diffuseColor.rgb;
+for (int texture2PaintIndex = 0; texture2PaintIndex < 32; texture2PaintIndex++) {
+  if (texture2PaintIndex >= texture2PaintPaletteCount) break;
+  vec3 texture2PaintDelta = diffuseColor.rgb - texture2PaintPalette[texture2PaintIndex];
+  float texture2PaintDistance = dot(texture2PaintDelta, texture2PaintDelta);
+  if (texture2PaintDistance < texture2PaintBestDistance) {
+    texture2PaintBestDistance = texture2PaintDistance;
+    texture2PaintBestColor = texture2PaintPalette[texture2PaintIndex];
+  }
+}
+diffuseColor.rgb = texture2PaintBestColor;
+`);
+  };
+  material.customProgramCacheKey = () => `${original.customProgramCacheKey?.call(material) || ''}|texture2paint:${cacheKey}`;
+  material._vertexQuantizationEnabled = true;
+  material.needsUpdate = true;
+}
+
 /**
  * Applies or removes quantized texture directly on the live model, with despeckle and smoothing.
  * Uses a single unified palette across all textured materials so color assignments are consistent.
@@ -2445,6 +2543,9 @@ export function applyLiveColorQuantization(
       const materials = Array.isArray(child.material) ? child.material : [child.material];
       for (const mat of materials) {
         if (!mat) continue;
+        if (child.isInstancedMesh && child.instanceColor) {
+          mat._texture2PaintHasInstanceColor = true;
+        }
         if (!allMaterials.includes(mat)) allMaterials.push(mat);
         if (mat.color && !mat._originalColor) mat._originalColor = mat.color.clone();
         if (!mat._originalMap && mat.map) {
@@ -2481,6 +2582,10 @@ export function applyLiveColorQuantization(
 
   rootObject._quantizedPalette = extractedPalette;
 
+  for (const material of allMaterials) {
+    setVertexColorPaletteShader(material, extractedPalette, enabled);
+  }
+
   // 2. Apply this unified palette to all supported materials
   const indexLut = createIndexLUT(extractedPalette);
   const resolutionPlan = planTextureWorkingSizes(texturedMaterials.map(mat => ({
@@ -2498,9 +2603,13 @@ export function applyLiveColorQuantization(
       mat.color.copy(mat._originalColor);
       mat._quantizationEnabled = false;
     } else {
-      const source = materialColorSample({ color: mat._originalColor });
-      const closest = closestPaletteIndex(source, extractedPalette);
-      setMaterialColorFromSample(mat, extractedPalette[closest]);
+      if (mat.vertexColors || mat._texture2PaintHasInstanceColor) {
+        mat.color.copy(mat._originalColor);
+      } else {
+        const source = materialColorSample({ color: mat._originalColor });
+        const closest = closestPaletteIndex(source, extractedPalette);
+        setMaterialColorFromSample(mat, extractedPalette[closest]);
+      }
       mat._quantizationEnabled = true;
     }
     mat.needsUpdate = true;
@@ -2562,6 +2671,10 @@ export function applyLiveColorQuantization(
     newTexture.repeat.copy(mat._originalMap.repeat);
     newTexture.center.copy(mat._originalMap.center);
     newTexture.rotation = mat._originalMap.rotation;
+    newTexture.channel = mat._originalMap.channel;
+    newTexture.magFilter = mat._originalMap.magFilter;
+    newTexture.minFilter = mat._originalMap.minFilter;
+    newTexture.anisotropy = mat._originalMap.anisotropy;
     newTexture.matrixAutoUpdate = mat._originalMap.matrixAutoUpdate;
     if (mat._originalMap.matrixAutoUpdate === false) {
       newTexture.matrix.copy(mat._originalMap.matrix);
@@ -2717,7 +2830,7 @@ function rasterCellState(raster, cellX, cellY) {
   const py = raster.flipY ? raster.height - 1 - textureRow : textureRow;
   const pixelIndex = py * raster.width + px;
   const alpha = raster.rgba ? raster.rgba[pixelIndex * 4 + 3] : 255;
-  return alpha < 128 ? -1 : raster.labels[pixelIndex];
+  return alpha < (raster.alphaThreshold ?? 128) ? -1 : raster.labels[pixelIndex];
 }
 
 function getRasterBoundaryIndex(raster, traceStats) {
@@ -2918,14 +3031,13 @@ function traceDegenerateTextureBoundarySegments(texturePoints, raster, traceStat
   return segments;
 }
 
-function traceTextureBoundarySegments(tri, traceStats) {
-  const raster = tri.raster;
+function traceSingleTextureBoundarySegments(tri, raster, uvCoordinates, traceStats) {
   if (!raster) return [];
 
   const texturePoints = [
-    transformPaintUv(raster, tri.u0, tri.v0),
-    transformPaintUv(raster, tri.u1, tri.v1),
-    transformPaintUv(raster, tri.u2, tri.v2),
+    transformPaintUv(raster, uvCoordinates[0][0], uvCoordinates[0][1]),
+    transformPaintUv(raster, uvCoordinates[1][0], uvCoordinates[1][1]),
+    transformPaintUv(raster, uvCoordinates[2][0], uvCoordinates[2][1]),
   ];
   const e1x = texturePoints[1][0] - texturePoints[0][0];
   const e1y = texturePoints[1][1] - texturePoints[0][1];
@@ -3004,6 +3116,80 @@ function traceTextureBoundarySegments(tri, traceStats) {
     }
   }
 
+  return segments;
+}
+
+function traceTextureBoundarySegments(tri, traceStats) {
+  const rasters = tri.paintRasters || (tri.raster ? [{
+    raster: tri.raster,
+    uv: [[tri.u0, tri.v0], [tri.u1, tri.v1], [tri.u2, tri.v2]],
+  }] : []);
+  const segments = [];
+  for (const entry of rasters) {
+    segments.push(...traceSingleTextureBoundarySegments(tri, entry.raster, entry.uv, traceStats));
+  }
+  return segments;
+}
+
+function traceVertexColorBoundarySegments(tri, traceStats, divisions) {
+  if (!tri.vertexColors || !tri.sampleLocal) return [];
+  const varies = [0, 1, 2, 3].some(component => {
+    const values = tri.vertexColors.map(color => color[component]);
+    return Math.max(...values) - Math.min(...values) > 1e-7;
+  });
+  if (!varies) return [];
+
+  const stateAt = point => {
+    const paint = tri.sampleLocal(point);
+    return paint.alpha < 128 ? -1 : paint.color;
+  };
+  const crossing = (a, b, stateA) => {
+    let low = a;
+    let high = b;
+    for (let iteration = 0; iteration < 12; iteration++) {
+      const midpoint = [(low[0] + high[0]) * 0.5, (low[1] + high[1]) * 0.5];
+      if (stateAt(midpoint) === stateA) low = midpoint;
+      else high = midpoint;
+    }
+    return [(low[0] + high[0]) * 0.5, (low[1] + high[1]) * 0.5];
+  };
+  const segments = [];
+  const visitCell = points => {
+    const states = points.map(stateAt);
+    if (states[0] === states[1] && states[1] === states[2]) return;
+    const crossings = [];
+    for (let edge = 0; edge < 3; edge++) {
+      const next = (edge + 1) % 3;
+      if (states[edge] !== states[next]) {
+        crossings.push(crossing(points[edge], points[next], states[edge]));
+      }
+    }
+    if (crossings.length === 2) {
+      segments.push([crossings[0], crossings[1]]);
+    } else if (crossings.length === 3) {
+      const junction = [
+        (crossings[0][0] + crossings[1][0] + crossings[2][0]) / 3,
+        (crossings[0][1] + crossings[1][1] + crossings[2][1]) / 3,
+      ];
+      for (const point of crossings) segments.push([point, junction]);
+    }
+  };
+  for (let x = 0; x < divisions; x++) {
+    for (let y = 0; y < divisions - x; y++) {
+      const p00 = [x / divisions, y / divisions];
+      const p10 = [(x + 1) / divisions, y / divisions];
+      const p01 = [x / divisions, (y + 1) / divisions];
+      visitCell([p00, p10, p01]);
+      if (x + y <= divisions - 2) {
+        visitCell([p10, [(x + 1) / divisions, (y + 1) / divisions], p01]);
+      }
+    }
+  }
+  traceStats.boundarySegments += segments.length;
+  traceStats.scanSteps += divisions * divisions;
+  if (traceStats.boundarySegments > MAX_PAINT_BOUNDARY_SEGMENTS) {
+    throw new Error('Vertex-color boundary is too complex to trace safely. Reduce the model complexity.');
+  }
   return segments;
 }
 
@@ -3473,7 +3659,9 @@ function paintTriangulationSignature(tri, triangles) {
     const area = Math.abs(polygonArea2D(triangle.points));
     coveredArea += area;
     const uv = localPaintPointToUv(tri, triangle.samplePoint);
-    const paint = tri.sampler(uv[0], uv[1]);
+    const paint = tri.sampleLocal
+      ? tri.sampleLocal(triangle.samplePoint)
+      : tri.sampler(uv[0], uv[1]);
     const state = paint.alpha < 128 ? -1 : paint.color;
     areaByState.set(state, (areaByState.get(state) || 0) + area);
     if (!regionsByState.has(state)) regionsByState.set(state, new Set());
@@ -3538,18 +3726,33 @@ export async function exportMultiColor3MF(
   paintResolutionMm = 0
 ) {
   rootObject.updateWorldMatrix(true, true);
-
-  const meshes = [];
-  rootObject.traverse(child => {
-    if (child.isMesh && child.geometry) {
-      meshes.push(child);
-    }
+  const renderTriangles = [];
+  const rootBox = new THREE.Box3();
+  const allMats = [];
+  forEachRenderableTriangle(rootObject, triangle => {
+    renderTriangles.push(triangle);
+    for (const point of triangle.positions) rootBox.expandByPoint(point);
+    if (!allMats.includes(triangle.material)) allMats.push(triangle.material);
   });
+  if (renderTriangles.length === 0 || rootBox.isEmpty()) {
+    throw new Error('No visible mesh triangles found to export');
+  }
+  const unsupportedMaterial = allMats.find(material =>
+    material?.isShaderMaterial || material?.isRawShaderMaterial || material?.isNodeMaterial
+  );
+  if (unsupportedMaterial) {
+    throw new Error('Custom shader materials cannot be converted to printable colors. Bake the shader result to a base-color texture first.');
+  }
+  const animatedVertexColor = renderTriangles.find(({ mesh, geometry }) =>
+    geometry.morphAttributes?.color?.length &&
+    mesh.morphTargetInfluences?.some(influence => Math.abs(influence) > 1e-9)
+  );
+  if (animatedVertexColor) {
+    throw new Error('Animated morph-target colors are not supported. Bake the current colors to a base-color texture or static vertex colors first.');
+  }
 
-  if (meshes.length === 0) throw new Error('No mesh found to export');
-
-  // 1. Calculate bounding box of the whole model in world space
-  const rootBox = new THREE.Box3().setFromObject(rootObject);
+  // 1. Calculate bounds from the same visible, rendered triangles that will
+  // be emitted. This keeps hidden children from changing output size/position.
   const rootSize = rootBox.getSize(new THREE.Vector3());
   const maxDim = Math.max(rootSize.x, rootSize.y, rootSize.z) || 1.0;
   const scaleRatio = (targetSizeMm || 150.0) / maxDim;
@@ -3558,15 +3761,7 @@ export async function exportMultiColor3MF(
   // minZ is the lowest Y in world coordinates so model rests at Z=0.
   const minZ = rootBox.min.y;
 
-  // 2. COLOR PALETTE: Collect all materials across meshes
-  const allMats = [];
-  for (const m of meshes) {
-    const mats = Array.isArray(m.material) ? m.material : [m.material];
-    for (const mat of mats) {
-      if (mat && !allMats.includes(mat)) allMats.push(mat);
-    }
-  }
-
+  // 2. COLOR PALETTE: use only materials referenced by visible triangles.
   let palette = null;
   if (customPalette && customPalette.length > 0) {
     palette = customPalette;
@@ -3583,9 +3778,23 @@ export async function exportMultiColor3MF(
 
   const indexLut = createIndexLUT(palette);
   const perceptualPalette = palette.map(srgbSampleToOklab);
+  const linearPalette = palette.map(color => color.map(channel => srgbChannelToLinear(channel / 255)));
 
   const getClosestColor = (r, g, b) => {
     return closestPaletteIndex([r, g, b], palette, perceptualPalette);
+  };
+  const getClosestLinearColor = (red, green, blue) => {
+    let bestIndex = 0;
+    let bestDistance = Infinity;
+    for (let index = 0; index < linearPalette.length; index++) {
+      const color = linearPalette[index];
+      const distance = (red - color[0]) ** 2 + (green - color[1]) ** 2 + (blue - color[2]) ** 2;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    }
+    return bestIndex;
   };
 
   // Build a color sampler for each material
@@ -3684,14 +3893,19 @@ export async function exportMultiColor3MF(
         const py = Math.min(H - 1, Math.max(0, Math.floor(finalV * H)));
         const off = (py * W + px) * 4;
         const color = labels[py * W + px];
-        const alpha = imgData[off + 3];
+        const alpha = Math.round(imgData[off + 3] * Math.max(0, Math.min(1, m.opacity ?? 1)));
         return { color, alpha };
       };
+      const rasterRgba = new Uint8ClampedArray(imgData);
+      const opacity = Math.max(0, Math.min(1, m.opacity ?? 1));
+      for (let pixel = 0; pixel < W * H; pixel++) {
+        rasterRgba[pixel * 4 + 3] = Math.round(rasterRgba[pixel * 4 + 3] * opacity);
+      }
       sampler.raster = {
         width: W,
         height: H,
         labels,
-        rgba: imgData,
+        rgba: rasterRgba,
         repeatX: repeat.x,
         repeatY: repeat.y,
         offsetX: offset.x,
@@ -3700,54 +3914,116 @@ export async function exportMultiColor3MF(
         wrapS,
         wrapT,
         flipY: map?.flipY ?? true,
+        alphaThreshold: Math.min(256, Math.round((m.alphaTest || 0.5) * 255)),
       };
       materialSamplers.set(m, sampler);
     } else if (m.color) {
       const [r, g, b] = materialColorSample(m);
       const colIdx = getClosestColor(r, g, b);
-      materialSamplers.set(m, () => ({ color: colIdx, alpha: 255 }));
+      materialSamplers.set(m, () => ({
+        color: colIdx,
+        alpha: Math.round(255 * Math.max(0, Math.min(1, m.opacity ?? 1))),
+      }));
     } else {
       materialSamplers.set(m, () => ({ color: 0, alpha: 255 }));
     }
   }
 
-  // 3. COLLECT INITIAL TRIANGLES ACROSS ALL MESHES
-  const initialTriangles = [];
-  const tempV0 = new THREE.Vector3();
-  const tempV1 = new THREE.Vector3();
-  const tempV2 = new THREE.Vector3();
-
-  for (const mesh of meshes) {
-    const geo = mesh.geometry;
-    const pos = geo.attributes.position;
-    const uvAttr = geo.attributes.uv;
-    const idx = geo.index;
-    const triCount = idx ? (idx.count / 3) : (pos.count / 3);
-    const wm = mesh.matrixWorld;
-    const groups = geo.groups;
-    const meshMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-
-    for (let t = 0; t < triCount; t++) {
-      let mat = meshMaterials[0];
-      if (groups && groups.length > 0) {
-        const vStart = t * 3;
-        for (const g of groups) {
-          if (vStart >= g.start && vStart < g.start + g.count) {
-            mat = meshMaterials[g.materialIndex] || meshMaterials[0];
-            break;
-          }
+  // Alpha maps are independent textures in Three.js: their green channel,
+  // transform, wrapping, and UV channel can all differ from the base map.
+  const alphaSamplers = new Map();
+  for (const material of allMats) {
+    const texture = material.alphaMap;
+    const image = texture?.image;
+    if (!image?.width || !image?.height) continue;
+    const planned = planTextureWorkingSizes([{ width: image.width, height: image.height }])[0];
+    let source;
+    if (image.data) {
+      const channels = Math.max(1, Math.floor(image.data.length / (image.width * image.height)));
+      source = new Uint8ClampedArray(planned.width * planned.height * 4);
+      for (let y = 0; y < planned.height; y++) {
+        const sourceY = Math.min(image.height - 1, Math.floor(y * image.height / planned.height));
+        for (let x = 0; x < planned.width; x++) {
+          const sourceX = Math.min(image.width - 1, Math.floor(x * image.width / planned.width));
+          const sourceOffset = (sourceY * image.width + sourceX) * channels;
+          const targetOffset = (y * planned.width + x) * 4;
+          const red = image.data[sourceOffset] ?? 0;
+          source[targetOffset] = red;
+          source[targetOffset + 1] = channels > 1 ? image.data[sourceOffset + 1] : red;
+          source[targetOffset + 2] = channels > 2 ? image.data[sourceOffset + 2] : red;
+          source[targetOffset + 3] = channels > 3 ? image.data[sourceOffset + 3] : 255;
         }
       }
+    } else {
+      const canvas = document.createElement('canvas');
+      canvas.width = planned.width;
+      canvas.height = planned.height;
+      const context = canvas.getContext('2d');
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      source = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    }
+    if (texture.matrixAutoUpdate !== false) texture.updateMatrix?.();
+    const rasterRgba = new Uint8ClampedArray(source);
+    const labels = new Uint8Array(planned.width * planned.height);
+    for (let pixel = 0; pixel < labels.length; pixel++) {
+      rasterRgba[pixel * 4 + 3] = source[pixel * 4 + 1];
+    }
+    const raster = {
+      width: planned.width,
+      height: planned.height,
+      labels,
+      rgba: rasterRgba,
+      repeatX: texture.repeat?.x ?? 1,
+      repeatY: texture.repeat?.y ?? 1,
+      offsetX: texture.offset?.x ?? 0,
+      offsetY: texture.offset?.y ?? 0,
+      uvMatrix: texture.matrix?.elements ? Array.from(texture.matrix.elements) : null,
+      wrapS: texture.wrapS ?? THREE.ClampToEdgeWrapping,
+      wrapT: texture.wrapT ?? THREE.ClampToEdgeWrapping,
+      flipY: texture.flipY ?? true,
+      alphaThreshold: Math.min(
+        256,
+        Math.round((material.alphaTest || 0.5) * 255 /
+          Math.max(1e-9, Math.max(0, Math.min(1, material.opacity ?? 1))))
+      ),
+    };
+    const sample = (rawU, rawV) => {
+      const transformed = transformPaintUv(raster, rawU, rawV);
+      const u = wrappedTextureCoordinate(transformed[0], raster.wrapS);
+      const v = wrappedTextureCoordinate(transformed[1], raster.wrapT);
+      const x = Math.min(raster.width - 1, Math.max(0, Math.floor(u * raster.width)));
+      const finalV = raster.flipY ? 1 - v : v;
+      const y = Math.min(raster.height - 1, Math.max(0, Math.floor(finalV * raster.height)));
+      return source[(y * raster.width + x) * 4 + 1];
+    };
+    sample.raster = raster;
+    alphaSamplers.set(material, sample);
+  }
 
+  // 3. COLLECT INITIAL TRIANGLES ACROSS ALL MESHES
+  const initialTriangles = [];
+  const uvAttributeFor = (geometry, texture) => {
+    const channel = Math.max(0, Math.floor(Number(texture?.channel) || 0));
+    return geometry.getAttribute(channel === 0 ? 'uv' : `uv${channel}`);
+  };
+  const vertexComponent = (attribute, index, component, fallback) => {
+    if (!attribute || component >= attribute.itemSize) return fallback;
+    if (component === 0) return attribute.getX(index);
+    if (component === 1) return attribute.getY(index);
+    if (component === 2) return attribute.getZ(index);
+    return attribute.getW(index);
+  };
+
+  for (const triangle of renderTriangles) {
+      const { geometry: geo, material: mat, indices, positions, instanceColor } = triangle;
       const sampler = materialSamplers.get(mat) || (() => ({ color: 0, alpha: 255 }));
-
-      const i0 = idx ? idx.getX(t * 3) : (t * 3);
-      const i1 = idx ? idx.getX(t * 3 + 1) : (t * 3 + 1);
-      const i2 = idx ? idx.getX(t * 3 + 2) : (t * 3 + 2);
-
-      tempV0.set(pos.getX(i0), pos.getY(i0), pos.getZ(i0)).applyMatrix4(wm);
-      tempV1.set(pos.getX(i1), pos.getY(i1), pos.getZ(i1)).applyMatrix4(wm);
-      tempV2.set(pos.getX(i2), pos.getY(i2), pos.getZ(i2)).applyMatrix4(wm);
+      const sourceMap = mat._originalMap || mat.map;
+      const uvAttr = uvAttributeFor(geo, sourceMap);
+      const alphaSampler = alphaSamplers.get(mat) || null;
+      const alphaUvAttr = uvAttributeFor(geo, mat.alphaMap);
+      const colorAttr = mat.vertexColors ? geo.getAttribute('color') : null;
+      const [i0, i1, i2] = indices;
+      const [tempV0, tempV1, tempV2] = positions;
 
       // (x, y, z) -> (x, -z, y), subtract minZ, scale by scaleRatio
       const x0 = tempV0.x * scaleRatio;
@@ -3769,7 +4045,11 @@ export async function exportMultiColor3MF(
       const u2 = uvAttr ? uvAttr.getX(i2) : 0;
       const v2_uv = uvAttr ? uvAttr.getY(i2) : 0;
 
-      initialTriangles.push({
+      const alphaUv = [i0, i1, i2].map(index => [
+        alphaUvAttr ? alphaUvAttr.getX(index) : 0,
+        alphaUvAttr ? alphaUvAttr.getY(index) : 0,
+      ]);
+      const initialTriangle = {
         p0: [x0, y0, z0],
         p1: [x1, y1, z1],
         p2: [x2, y2, z2],
@@ -3778,8 +4058,59 @@ export async function exportMultiColor3MF(
         u2, v2: v2_uv,
         sampler,
         raster: sampler.raster || null,
-      });
-    }
+        vertexColors: colorAttr ? [i0, i1, i2].map(index => [
+          vertexComponent(colorAttr, index, 0, 1),
+          vertexComponent(colorAttr, index, 1, 1),
+          vertexComponent(colorAttr, index, 2, 1),
+          vertexComponent(colorAttr, index, 3, 1),
+        ]) : null,
+        instanceColor: instanceColor ? [instanceColor.r, instanceColor.g, instanceColor.b] : null,
+      };
+      initialTriangle.paintRasters = [];
+      if (sampler.raster) {
+        initialTriangle.paintRasters.push({
+          raster: sampler.raster,
+          uv: [[u0, v0_uv], [u1, v1_uv], [u2, v2_uv]],
+        });
+      }
+      if (alphaSampler?.raster) {
+        initialTriangle.paintRasters.push({ raster: alphaSampler.raster, uv: alphaUv });
+      }
+      initialTriangle.sampleLocal = point => {
+        const weights = [1 - point[0] - point[1], point[0], point[1]];
+        const paintUv = localPaintPointToUv(initialTriangle, point);
+        const paint = sampler(paintUv[0], paintUv[1]);
+        let alpha = paint.alpha;
+        if (alphaSampler) {
+          const alphaU = weights[0] * alphaUv[0][0] + weights[1] * alphaUv[1][0] + weights[2] * alphaUv[2][0];
+          const alphaV = weights[0] * alphaUv[0][1] + weights[1] * alphaUv[1][1] + weights[2] * alphaUv[2][1];
+          alpha *= alphaSampler(alphaU, alphaV) / 255;
+        }
+        let color = paint.color;
+        if (initialTriangle.vertexColors || initialTriangle.instanceColor) {
+          const source = palette[color] || palette[0];
+          const solidBaseColor = !sourceMap ? (mat._originalColor || mat.color) : null;
+          let linearRed = solidBaseColor?.r ?? srgbChannelToLinear(source[0] / 255);
+          let linearGreen = solidBaseColor?.g ?? srgbChannelToLinear(source[1] / 255);
+          let linearBlue = solidBaseColor?.b ?? srgbChannelToLinear(source[2] / 255);
+          if (initialTriangle.vertexColors) {
+            const colors = initialTriangle.vertexColors;
+            linearRed *= weights[0] * colors[0][0] + weights[1] * colors[1][0] + weights[2] * colors[2][0];
+            linearGreen *= weights[0] * colors[0][1] + weights[1] * colors[1][1] + weights[2] * colors[2][1];
+            linearBlue *= weights[0] * colors[0][2] + weights[1] * colors[1][2] + weights[2] * colors[2][2];
+            alpha *= weights[0] * colors[0][3] + weights[1] * colors[1][3] + weights[2] * colors[2][3];
+          }
+          if (initialTriangle.instanceColor) {
+            linearRed *= initialTriangle.instanceColor[0];
+            linearGreen *= initialTriangle.instanceColor[1];
+            linearBlue *= initialTriangle.instanceColor[2];
+          }
+          color = getClosestLinearColor(linearRed, linearGreen, linearBlue);
+        }
+        const cutoff = Math.max(0, Math.min(1, mat.alphaTest || 0.5));
+        return { color, alpha: alpha / 255 < cutoff ? 0 : 255 };
+      };
+      initialTriangles.push(initialTriangle);
   }
 
   // 4. TRACE THE DISCRETE TEXTURE BOUNDARIES, THEN CONSTRAIN THE MESH TO THEM.
@@ -3809,6 +4140,12 @@ export async function exportMultiColor3MF(
     exactFallbackFaces: 0,
   };
   const sharedEdgeSplits = new Map();
+  const vertexColoredTriangleCount = initialTriangles.reduce(
+    (count, triangle) => count + (triangle.vertexColors ? 1 : 0), 0
+  );
+  const vertexTraceDivisions = vertexColoredTriangleCount > 0
+    ? Math.max(2, Math.min(32, Math.floor(Math.sqrt(500000 / vertexColoredTriangleCount))))
+    : 0;
 
   function registerSharedEdgeSplit(pA, pB, t) {
     const keyA = getPosKey(pA[0], pA[1], pA[2]);
@@ -3833,6 +4170,7 @@ export async function exportMultiColor3MF(
 
   for (const tri of initialTriangles) {
     const exactSegments = traceTextureBoundarySegments(tri, traceStats);
+    exactSegments.push(...traceVertexColorBoundarySegments(tri, traceStats, vertexTraceDivisions));
     tri.exactPaintBoundarySegments = exactSegments;
     const simplifiedSegments = simplifyPaintBoundaryNetwork(exactSegments, tri, boundaryToleranceMm);
     if (boundaryToleranceMm > 0 &&
@@ -3914,7 +4252,9 @@ export async function exportMultiColor3MF(
         localTriangle = [localTriangle[0], localTriangle[2], localTriangle[1]];
       }
       const centerUv = localPaintPointToUv(sourceTri, regionTriangle.samplePoint);
-      const paint = sourceTri.sampler(centerUv[0], centerUv[1]);
+      const paint = sourceTri.sampleLocal
+        ? sourceTri.sampleLocal(regionTriangle.samplePoint)
+        : sourceTri.sampler(centerUv[0], centerUv[1]);
       const positions = localTriangle.map(point => localPaintPointToPosition(sourceTri, point));
       const uvs = localTriangle.map(point => localPaintPointToUv(sourceTri, point));
       currentTriangles.push({
@@ -4045,34 +4385,85 @@ export async function exportMultiColor3MF(
   }).buffer;
 }
 
+function textureHasTransparentPixels(texture) {
+  const image = texture?.image;
+  if (!image) return false;
+  let data = image.data;
+  let channels = 0;
+  if (data && image.width && image.height) {
+    channels = Math.floor(data.length / (image.width * image.height));
+  } else {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(image, 0, 0);
+      data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      channels = 4;
+    } catch {
+      return true;
+    }
+  }
+  if (channels < 4) return false;
+  for (let offset = 3; offset < data.length; offset += channels) {
+    if (data[offset] < 255) return true;
+  }
+  return false;
+}
+
 /**
  * Exports GLB, respecting active color quantization toggle and custom palette.
  */
 export function exportProcessedGlb(model, {
   GLTFExporter = globalThis.GLTFExporter,
+  textureFormat = 'automatic',
 } = {}) {
   return new Promise((resolve, reject) => {
     if (!model) return reject(new Error('No model to export'));
     if (!GLTFExporter) return reject(new Error('GLTFExporter is required'));
 
+    const normalizedTextureFormat = textureFormat === 'original' ? 'automatic' : textureFormat;
+    if (!['automatic', 'png', 'jpeg'].includes(normalizedTextureFormat)) {
+      return reject(new Error(`Unsupported GLB texture encoding: ${textureFormat}`));
+    }
+    const textureMimeType = normalizedTextureFormat === 'png'
+      ? 'image/png'
+      : normalizedTextureFormat === 'jpeg' ? 'image/jpeg' : null;
+    const textureSlots = [
+      'map', 'alphaMap', 'aoMap', 'bumpMap', 'normalMap', 'displacementMap',
+      'emissiveMap', 'metalnessMap', 'roughnessMap', 'clearcoatMap',
+      'clearcoatNormalMap', 'clearcoatRoughnessMap', 'iridescenceMap',
+      'iridescenceThicknessMap', 'sheenColorMap', 'sheenRoughnessMap',
+      'specularColorMap', 'specularIntensityMap', 'thicknessMap', 'transmissionMap',
+    ];
     const exportScene = model.clone(true);
     exportScene.traverse(child => {
       if (child.isMesh) {
         child.geometry = child.geometry.clone();
         if (child.material) {
-          if (Array.isArray(child.material)) {
-            // Handle multi-material arrays from game rips
-            child.material = child.material.map(mat => {
-              const m = mat.clone();
-              if (m.map) m.map = m.map.clone();
-              return m;
-            });
-          } else {
-            child.material = child.material.clone();
-            if (child.material.map) {
-              child.material.map = child.material.map.clone();
+          const cloneMaterial = material => {
+            const cloned = material.clone();
+            if (normalizedTextureFormat === 'jpeg' &&
+              (material.alphaMap || material.transparent || (material.opacity ?? 1) < 1 ||
+                ((material.alphaTest || 0) > 0 && textureHasTransparentPixels(material.map)))) {
+              throw new Error('JPEG cannot preserve transparency used by this model. Choose Automatic or PNG.');
             }
-          }
+            for (const slot of textureSlots) {
+              if (!cloned[slot]) continue;
+              cloned[slot] = cloned[slot].clone();
+              if (textureMimeType) {
+                cloned[slot].userData = {
+                  ...cloned[slot].userData,
+                  mimeType: textureMimeType,
+                };
+              }
+            }
+            return cloned;
+          };
+          child.material = Array.isArray(child.material)
+            ? child.material.map(cloneMaterial)
+            : cloneMaterial(child.material);
         }
       }
     });
@@ -4092,6 +4483,40 @@ export function exportProcessedGlb(model, {
   });
 }
 
+/** Reports whether a model contains authored color information worth processing. */
+export function analyzeModelColorSources(rootObject) {
+  const result = {
+    hasAuthoredColor: false,
+    textureCount: 0,
+    vertexColorMeshCount: 0,
+    solidColorCount: 0,
+  };
+  if (!rootObject) return result;
+  const textures = new Set();
+  const solidColors = new Set();
+  rootObject.traverse(child => {
+    if (!child.isMesh || !child.geometry || !isObjectVisible(child)) return;
+    const colorAttribute = child.geometry.getAttribute('color');
+    if (colorAttribute && colorAttribute.count > 0) result.vertexColorMeshCount++;
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    for (const material of materials) {
+      if (!material || material.visible === false) continue;
+      const map = material._originalMap || material.map;
+      if (map?.image) textures.add(map);
+      if (!material._texture2PaintFallback && material.color) {
+        const sample = colorToSrgbSample(material._originalColor || material.color);
+        if (sample) solidColors.add(sample.join(','));
+      }
+    }
+  });
+  result.textureCount = textures.size;
+  result.solidColorCount = solidColors.size;
+  const hasMeaningfulSolidColor = [...solidColors].some(key => key !== '255,255,255');
+  result.hasAuthoredColor = result.textureCount > 0 || result.vertexColorMeshCount > 0 ||
+    hasMeaningfulSolidColor || result.solidColorCount > 1;
+  return result;
+}
+
 export function getModelTextures(rootObject) {
   if (!rootObject) return [];
   const textures = new Map();
@@ -4099,15 +4524,17 @@ export function getModelTextures(rootObject) {
     if (child.isMesh && child.material) {
       const mats = Array.isArray(child.material) ? child.material : [child.material];
       for (const mat of mats) {
-        if (mat && mat.map && !textures.has(mat.map)) {
-          const resolution = mat._textureProcessingResolution;
-          textures.set(mat.map, {
-            slot: 'BaseColor',
-            width: mat.map.image?.width || 0,
-            height: mat.map.image?.height || 0,
-            mimeType: 'image/png',
-            sourceWidth: resolution?.sourceWidth || mat.map.image?.width || 0,
-            sourceHeight: resolution?.sourceHeight || mat.map.image?.height || 0,
+        if (!mat) continue;
+        for (const [slot, texture] of [['BaseColor', mat.map], ['Alpha', mat.alphaMap]]) {
+          if (!texture || textures.has(texture)) continue;
+          const resolution = slot === 'BaseColor' ? mat._textureProcessingResolution : null;
+          textures.set(texture, {
+            slot,
+            width: texture.image?.width || 0,
+            height: texture.image?.height || 0,
+            mimeType: texture.userData?.mimeType || 'image/embedded',
+            sourceWidth: resolution?.sourceWidth || texture.image?.width || 0,
+            sourceHeight: resolution?.sourceHeight || texture.image?.height || 0,
             downsampled: resolution?.downsampled || false,
           });
         }

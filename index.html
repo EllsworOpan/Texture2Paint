@@ -1495,13 +1495,13 @@
             <span class="proc-label-with-help">
               <label for="proc-texture-format" class="proc-tag">Texture Encoding</label>
               <button class="proc-help" type="button" aria-label="About texture encoding" aria-expanded="false"
-                aria-describedby="proc-tooltip" data-help="Preserve the source texture bytes, or convert embedded WebP textures for compatibility with tools such as DitherForge, DCC apps, and game engines.">i</button>
+                aria-describedby="proc-tooltip" data-help="Automatic keeps compatible JPEG/PNG encodings and converts WebP when needed. PNG and JPEG force re-encoding for tools such as DitherForge, DCC apps, and game engines; JPEG is unavailable when it would discard transparency.">i</button>
             </span>
             <span class="proc-tag">Export Compatibility</span>
           </div>
           <div class="select-wrapper">
             <select id="proc-texture-format" class="proc-select" aria-label="Target Texture Encoding">
-              <option value="original">None / Original (Untouched)</option>
+              <option value="automatic">Automatic (Compatible)</option>
               <option value="png">PNG (Re-encode embedded)</option>
               <option value="jpeg">JPEG (Re-encode embedded)</option>
             </select>
@@ -1686,8 +1686,8 @@
       <h2>Drop a 3D file here</h2>
       <p>or click to browse one or more files</p>
     </div>
-    <div class="formats">Imports <b>.glb</b>, <b>.gltf</b>, <b>.obj</b>, <b>.stl</b>, <b>.ply</b>,
-      <b>.dae</b>, <b>.3mf</b>, <b>.fbx</b>, <b>.zip</b> &middot; processed locally, nothing uploaded
+    <div class="formats">Imports <b>.glb</b>, <b>.gltf</b>, <b>.obj</b>, <b>.ply</b>,
+      <b>.dae</b>, <b>.fbx</b>, <b>.zip</b> &middot; processed locally, nothing uploaded
     </div>
   </div>
 
@@ -1698,7 +1698,7 @@
   <div id="toast" class="hidden"></div>
 
   <!-- file input -->
-  <input id="picker" type="file" accept=".meshy,.glb,.gltf,.obj,.stl,.ply,.dae,.3mf,.fbx,.zip" multiple hidden>
+  <input id="picker" type="file" accept=".meshy,.glb,.gltf,.obj,.ply,.dae,.fbx,.zip" multiple hidden>
 
   <!-- footer -->
   <div id="foot">
@@ -1718,6 +1718,7 @@
       applyLiveColorQuantization,
       exportMultiColor3MF,
       exportProcessedGlb,
+      analyzeModelColorSources,
       linkGlbOriginalTextures,
       getModelTextures,
       applyLiveMeshRepair,
@@ -1726,10 +1727,8 @@
     import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
     import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
     import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
-    import { STLLoader } from 'three/addons/loaders/STLLoader.js';
     import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
     import { ColladaLoader } from 'three/addons/loaders/ColladaLoader.js';
-    import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
     import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
     import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
     import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
@@ -1930,8 +1929,9 @@
       $info.innerHTML = `<b>${lastBaseName}</b> &mdash; ${lastLoadedFormat} &middot; ${lastLoadedSizeMb} MB &middot; ${triangles.toLocaleString()} triangles`;
     }
 
-    const IMPORT_FORMATS = new Set(['meshy', 'glb', 'gltf', 'obj', 'stl', 'ply', 'dae', '3mf', 'fbx', 'zip']);
-    const IMPORT_FORMAT_LABEL = '.meshy, .glb, .gltf, .obj, .stl, .ply, .dae, .3mf, .fbx, or .zip';
+    const IMPORT_FORMATS = new Set(['meshy', 'glb', 'gltf', 'obj', 'ply', 'dae', 'fbx', 'zip']);
+    const IMPORT_FORMAT_LABEL = '.meshy, .glb, .gltf, .obj, .ply, .dae, .fbx, or .zip';
+    const MODEL_FORMAT_PRIORITY = ['meshy', 'glb', 'gltf', 'obj', 'fbx', 'dae', 'ply'];
 
     function extensionFor(name) {
       return name.toLowerCase().split('.').pop() || '';
@@ -2012,7 +2012,14 @@
 
     function meshFromGeometry(geometry) {
       if (!geometry.attributes.normal) geometry.computeVertexNormals();
-      const material = new THREE.MeshStandardMaterial({ color: 0xe7e9f2, roughness: 0.65, metalness: 0.02 });
+      const hasVertexColors = Boolean(geometry.getAttribute('color'));
+      const material = new THREE.MeshStandardMaterial({
+        color: hasVertexColors ? 0xffffff : 0xe7e9f2,
+        vertexColors: hasVertexColors,
+        roughness: 0.65,
+        metalness: 0.02,
+      });
+      if (!hasVertexColors) material._texture2PaintFallback = true;
       return new THREE.Mesh(geometry, material);
     }
 
@@ -2115,15 +2122,6 @@
         };
       }
 
-      if (ext === 'stl') {
-        const geometry = new STLLoader(manager).parse(buffer);
-        return {
-          object: meshFromGeometry(geometry),
-          sourceFormat: ext,
-          sizeBytes: buffer.byteLength,
-        };
-      }
-
       if (ext === 'ply') {
         const geometry = new PLYLoader(manager).parse(buffer);
         return {
@@ -2137,14 +2135,6 @@
         const text = new TextDecoder().decode(buffer);
         return {
           object: assertHasMesh(new ColladaLoader(manager).parse(text, '').scene),
-          sourceFormat: ext,
-          sizeBytes: buffer.byteLength,
-        };
-      }
-
-      if (ext === '3mf') {
-        return {
-          object: assertHasMesh(new ThreeMFLoader(manager).parse(buffer)),
           sourceFormat: ext,
           sizeBytes: buffer.byteLength,
         };
@@ -2387,42 +2377,27 @@
       const modelFiles = files.filter(file => IMPORT_FORMATS.has(extensionFor(file.name)) && extensionFor(file.name) !== 'zip');
       if (modelFiles.length === 0) throw new Error(`No supported 3D file found inside. Try ${IMPORT_FORMAT_LABEL}.`);
 
-      const primary = modelFiles[0];
+      const primary = [...modelFiles].sort((a, b) => {
+        const rankA = MODEL_FORMAT_PRIORITY.indexOf(extensionFor(a.name));
+        const rankB = MODEL_FORMAT_PRIORITY.indexOf(extensionFor(b.name));
+        return rankA - rankB || a.name.localeCompare(b.name);
+      })[0];
       $empty.classList.add('hide');
       lastBaseName = baseNameFor(primary.name);
       const resources = createResourceManager(files);
 
       try {
-        let loaded;
         if (modelFiles.length > 1) {
-          toast(`Loading ${modelFiles.length} sub-models from archive…`);
-          const group = new THREE.Group();
-          let totalBytes = 0;
-          let loadedCount = 0;
-          for (const mf of modelFiles) {
-            try {
-              const sub = await loadObjectFromFile(mf, resources.manager, files);
-              group.add(sub.object);
-              totalBytes += sub.sizeBytes;
-              loadedCount++;
-            } catch (err) {
-              console.warn(`Could not load sub-model ${mf.name}:`, err);
-            }
-          }
-          if (loadedCount === 0) {
-            throw new Error('Could not parse any 3D models from this archive');
-          }
-          loaded = {
-            object: assertHasMesh(group),
-            sourceFormat: extensionFor(primary.name),
-            sizeBytes: totalBytes,
-          };
-        } else {
-          loaded = await loadObjectFromFile(primary, resources.manager, files);
+          toast(`Using ${primary.name}; ignoring ${modelFiles.length - 1} alternate model file${modelFiles.length === 2 ? '' : 's'} in the archive.`);
         }
+        const loaded = await loadObjectFromFile(primary, resources.manager, files);
 
         canonicalizeModel(loaded.object);
         await waitForModelTextures(loaded.object);
+        const colorSources = analyzeModelColorSources(loaded.object);
+        if (!colorSources.hasAuthoredColor) {
+          throw new Error('This model has no authored texture, vertex color, or material color to convert.');
+        }
         const { triangles } = viewer.loadObject(loaded.object);
         sourceModelDocument = cloneModelForProcessing(viewer.currentModel);
         revokeUrls(lastResourceUrls);
@@ -2574,7 +2549,10 @@
       }
 
       if (format === 'glb') {
-        const data = await exportProcessedGlb(viewer.createExportObject(), { GLTFExporter });
+        const data = await exportProcessedGlb(viewer.createExportObject(), {
+          GLTFExporter,
+          textureFormat: $procFormat.value,
+        });
         return { data, extension: 'glb', type: 'application/octet-stream' };
       }
 
@@ -2870,7 +2848,7 @@
 
     $procFormat.addEventListener('change', e => {
       const val = e.target.value;
-      const label = val === 'original' ? 'None / Original (Untouched)' : val.toUpperCase();
+      const label = val === 'automatic' ? 'Automatic (Compatible)' : val.toUpperCase();
       toast(`Target texture format: ${label}`, 'ok', 1500);
     });
 
