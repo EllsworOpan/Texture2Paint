@@ -198,13 +198,19 @@ export class Viewer {
   }
 
   loadObject(object) {
+    this._isUvFlipped = false;
+    applyUvFlip(object, false); // Initialize original UV cache
+    return this.replaceObject(object, { frame: true, uvFlipped: false });
+  }
+
+  /** Replaces the visible model without resetting the processing controls. */
+  replaceObject(object, { frame = false, uvFlipped = this._isUvFlipped } = {}) {
     if (this.currentModel) this.scene.remove(this.currentModel);
     this.currentModel = object;
-    this._isUvFlipped = false;
-    applyUvFlip(this.currentModel, false); // Initialize original UV cache
+    this._isUvFlipped = Boolean(uvFlipped);
     this._applyMaterialSettings(this.currentModel);
     this.scene.add(this.currentModel);
-    this._frame(this.currentModel);
+    if (frame) this._frame(this.currentModel);
 
     return {
       triangles: this.countTriangles(this.currentModel),

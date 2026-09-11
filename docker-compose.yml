@@ -1,9 +1,9 @@
 services:
-  meshy2glb:
+  texture2paint:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: meshy2glb
+    container_name: texture2paint
     ports:
       - "8080:80"
     volumes:

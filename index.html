@@ -499,19 +499,18 @@
       top: 56px;
       left: 12px;
       z-index: 18;
-      width: 290px;
+      width: 310px;
       background: rgba(15, 15, 26, .88);
       backdrop-filter: blur(16px);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 14px 16px;
+      padding: 0;
       display: none;
       flex-direction: column;
-      gap: 14px;
       box-shadow: 0 12px 36px rgba(0, 0, 0, .45);
       font-size: 12px;
       max-height: calc(100vh - 76px);
-      overflow-y: auto;
+      overflow: hidden;
     }
 
     .proc-toolbar.show {
@@ -535,8 +534,7 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      border-bottom: 1px solid rgba(255, 255, 255, .07);
-      padding-bottom: 10px;
+      padding: 13px 14px 10px;
     }
 
     .proc-title {
@@ -565,6 +563,63 @@
       letter-spacing: .04em;
     }
 
+    .proc-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      padding: 0 10px 9px;
+      border-bottom: 1px solid rgba(255, 255, 255, .07);
+    }
+
+    .proc-tab {
+      min-height: 34px;
+      padding: 6px 8px;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--text-dim);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: color .15s, background .15s, border-color .15s;
+    }
+
+    .proc-tab:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, .05);
+    }
+
+    .proc-tab[aria-selected="true"] {
+      color: #fff;
+      background: rgba(108, 138, 255, .16);
+      border-color: rgba(108, 138, 255, .45);
+    }
+
+    .proc-tab:focus-visible,
+    .proc-help:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .proc-tab-panels {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+
+    .proc-tab-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding: 13px 14px;
+    }
+
+    .proc-tab-panel[hidden] {
+      display: none;
+    }
+
     .proc-section {
       display: flex;
       flex-direction: column;
@@ -575,6 +630,13 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+    }
+
+    .proc-label-with-help {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
     }
 
     .proc-label {
@@ -590,10 +652,58 @@
       color: var(--text-faint);
     }
 
-    .proc-desc {
-      font-size: 11px;
-      color: var(--text-faint);
-      line-height: 1.4;
+    .proc-help {
+      display: inline-grid;
+      place-items: center;
+      width: 18px;
+      height: 18px;
+      padding: 0;
+      flex: 0 0 auto;
+      border: 1px solid rgba(255, 255, 255, .15);
+      border-radius: 50%;
+      background: rgba(255, 255, 255, .045);
+      color: var(--text-dim);
+      font: 600 11px/1 system-ui, sans-serif;
+      cursor: help;
+      transition: color .15s, border-color .15s, background .15s;
+    }
+
+    .proc-help:hover,
+    .proc-help[aria-expanded="true"] {
+      color: #fff;
+      border-color: rgba(108, 138, 255, .65);
+      background: rgba(108, 138, 255, .18);
+    }
+
+    .proc-tooltip {
+      position: fixed;
+      z-index: 40;
+      width: min(240px, calc(100vw - 24px));
+      padding: 9px 10px;
+      border: 1px solid rgba(108, 138, 255, .42);
+      border-radius: 7px;
+      background: rgba(25, 25, 42, .98);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.45;
+      pointer-events: none;
+    }
+
+    .proc-tooltip[hidden] {
+      display: none;
+    }
+
+    .proc-dependent {
+      transition: opacity .15s;
+    }
+
+    .proc-dependent.is-disabled {
+      opacity: .42;
+    }
+
+    .proc-dependent.is-disabled .proc-help {
+      pointer-events: auto;
     }
 
     .select-wrapper {
@@ -826,6 +936,13 @@
       padding-top: 10px;
     }
 
+    .proc-action-section {
+      flex: 0 0 auto;
+      padding: 11px 14px 13px;
+      border-top: 1px solid rgba(255, 255, 255, .08);
+      background: rgba(15, 15, 26, .96);
+    }
+
     .proc-count {
       font-size: 11px;
       color: var(--text-dim);
@@ -868,6 +985,10 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .proc-texture-dim.reduced {
+      color: var(--warn);
+    }
+
     .proc-texture-fmt {
       text-transform: uppercase;
       background: rgba(108, 138, 255, .12);
@@ -883,6 +1004,69 @@
       font-style: italic;
       padding: 4px 0;
       font-size: 11px;
+    }
+
+    .decal-candidate-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 8px;
+      max-height: 190px;
+      overflow-y: auto;
+    }
+
+    .decal-candidate {
+      padding: 7px 8px;
+      border: 1px solid rgba(255, 255, 255, .07);
+      border-radius: var(--radius-sm);
+      background: rgba(0, 0, 0, .18);
+    }
+
+    .decal-candidate-main {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .decal-candidate-main input {
+      accent-color: var(--accent);
+    }
+
+    .decal-candidate-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 11px;
+      color: var(--text);
+    }
+
+    .decal-confidence {
+      border-radius: 3px;
+      padding: 1px 4px;
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      background: rgba(255, 255, 255, .08);
+    }
+
+    .decal-confidence.high {
+      color: #8ff0ba;
+      background: rgba(52, 211, 153, .12);
+    }
+
+    .decal-receiver {
+      width: 100%;
+      height: 25px;
+      margin-top: 6px;
+      padding: 0 22px 0 7px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--text-dim);
+      font-size: 10px;
     }
 
     /* Dual Slider & Number Input */
@@ -1057,7 +1241,8 @@
       </svg>
       <span class="btn-label">Open file</span>
     </button>
-    <button class="btn" id="proc-btn" aria-label="Toggle processing toolbar">
+    <button class="btn" id="proc-btn" aria-label="Toggle processing toolbar" aria-expanded="false"
+      aria-controls="processing-toolbar">
       <svg viewBox="0 0 24 24">
         <path
           d="M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.28 19.58 10.59 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z" />
@@ -1100,10 +1285,24 @@
       <span class="proc-badge" id="proc-model-badge">READY</span>
     </div>
 
+    <div class="proc-tabs" role="tablist" aria-label="Processing categories">
+      <button class="proc-tab" id="proc-tab-mesh" type="button" role="tab" aria-selected="true"
+        aria-controls="proc-panel-mesh" data-proc-tab="mesh">Mesh &amp; Texture</button>
+      <button class="proc-tab" id="proc-tab-color" type="button" role="tab" aria-selected="false" tabindex="-1"
+        aria-controls="proc-panel-color" data-proc-tab="color">Color &amp; Print</button>
+    </div>
+
+    <div class="proc-tab-panels">
+      <div class="proc-tab-panel" id="proc-panel-mesh" role="tabpanel" aria-labelledby="proc-tab-mesh">
+
     <!-- Target Texture Encoding -->
     <div class="proc-section">
       <div class="proc-label-row">
-        <label for="proc-texture-format" class="proc-label">Texture Encoding</label>
+        <span class="proc-label-with-help">
+          <label for="proc-texture-format" class="proc-label">Texture Encoding</label>
+          <button class="proc-help" type="button" aria-label="About texture encoding" aria-expanded="false"
+            aria-describedby="proc-tooltip" data-help="Preserve the source texture bytes, or convert embedded WebP textures for broader compatibility with DCC tools and game engines.">i</button>
+        </span>
         <span class="proc-tag">Target Format</span>
       </div>
       <div class="select-wrapper">
@@ -1116,14 +1315,16 @@
           <path d="M7 10l5 5 5-5z" />
         </svg>
       </div>
-      <p class="proc-desc">Preserve source bytes or convert embedded WebP textures for maximum DCC and engine
-        compatibility.</p>
     </div>
 
     <!-- UV Orientation (Flip Y) -->
     <div class="proc-section">
       <div class="proc-label-row">
-        <span class="proc-label">UV Orientation</span>
+        <span class="proc-label-with-help">
+          <span class="proc-label">UV Orientation</span>
+          <button class="proc-help" type="button" aria-label="About UV orientation" aria-expanded="false"
+            aria-describedby="proc-tooltip" data-help="Invert the vertical texture coordinate when a model's texture appears upside down. The viewport updates immediately.">i</button>
+        </span>
         <span class="status-badge badge-normal" id="uv-status-badge">NORMAL</span>
       </div>
       <div class="toggle-row">
@@ -1133,13 +1334,16 @@
           <span class="slider"></span>
         </label>
       </div>
-      <p class="proc-desc">Inverts V coordinates in real time for immediate visual inspection in the 3D viewport.</p>
     </div>
 
     <!-- Decals & Alpha Cutout -->
     <div class="proc-section">
       <div class="proc-label-row">
-        <span class="proc-label">Decals &amp; Alpha Cutout</span>
+        <span class="proc-label-with-help">
+          <span class="proc-label">Decals &amp; Alpha Cutout</span>
+          <button class="proc-help" type="button" aria-label="About alpha cutout" aria-expanded="false"
+            aria-describedby="proc-tooltip" data-help="Remove transparent backgrounds from overlay decals such as eyes, mouths, and eyebrows. Adjust the threshold to control which pixels remain visible.">i</button>
+        </span>
         <span class="status-badge badge-active" id="alpha-status-badge">CUTOUT (0.5)</span>
       </div>
       <div class="toggle-row" style="margin-bottom: 6px;">
@@ -1149,21 +1353,61 @@
           <span class="slider"></span>
         </label>
       </div>
-      <div class="proc-label-row" style="margin-top: 4px;">
-        <label for="proc-alpha-slider" class="proc-tag">Cutout Threshold</label>
-        <span id="proc-alpha-badge" style="font-size: 10px; color: var(--text-faint);">0.50</span>
+      <div class="proc-dependent" data-enabled-by="proc-alpha-toggle">
+        <div class="proc-label-row" style="margin-top: 4px;">
+          <label for="proc-alpha-slider" class="proc-tag">Cutout Threshold</label>
+          <span id="proc-alpha-badge" style="font-size: 10px; color: var(--text-faint);">0.50</span>
+        </div>
+        <div class="proc-slider-row">
+          <input type="range" id="proc-alpha-slider" min="0.01" max="0.99" step="0.05" value="0.5">
+        </div>
       </div>
-      <div class="proc-slider-row">
-        <input type="range" id="proc-alpha-slider" min="0.01" max="0.99" step="0.05" value="0.5">
+    </div>
+
+    <!-- Floating textured sheets -> receiver texture bake -->
+    <div class="proc-section">
+      <div class="proc-label-row">
+        <span class="proc-label-with-help">
+          <span class="proc-label">Floating Decal Projection</span>
+          <button class="proc-help" type="button" aria-label="About floating decal projection" aria-expanded="false"
+            aria-describedby="proc-tooltip" data-help="Bake floating textured sheets into the surface beneath them. High-confidence sheets are selected automatically; review ambiguous matches before exporting.">i</button>
+        </span>
+        <span class="status-badge badge-normal" id="decal-bake-badge">OFF</span>
       </div>
-      <p class="proc-desc">Discards transparent quad backgrounds for overlayed decals (eyes, mouth, eyebrows) on
-        character faces.</p>
+      <div class="toggle-row" style="margin-bottom: 7px;">
+        <span class="toggle-text">Bake Sheets Into Surface</span>
+        <label class="switch" for="proc-decal-bake" aria-label="Bake floating textured sheets into their receiving surface">
+          <input type="checkbox" id="proc-decal-bake">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="proc-dependent" data-enabled-by="proc-decal-bake">
+        <div class="proc-label-row">
+          <label for="proc-decal-mode" class="proc-tag">Projection Direction</label>
+        </div>
+        <div class="select-wrapper" style="margin-top: 4px;">
+          <select id="proc-decal-mode" class="proc-select" aria-label="Floating decal projection direction">
+            <option value="auto">Surface Conforming (Local)</option>
+            <option value="sheet-normal">Along Sheet Normal</option>
+            <option value="receiver-normal">Along Surface Normal</option>
+            <option value="closest">Closest Surface</option>
+          </select>
+          <svg class="select-arrow" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z" /></svg>
+        </div>
+      </div>
+      <div id="decal-candidate-list" class="decal-candidate-list">
+        <div class="proc-texture-empty">Load a model to detect textured sheets</div>
+      </div>
     </div>
 
     <!-- Mesh Repair & Sealing (Welding, Disjoint Mesh Healing, Hole Closing) -->
     <div class="proc-section">
       <div class="proc-label-row">
-        <span class="proc-label">Mesh Repair &amp; Weld</span>
+        <span class="proc-label-with-help">
+          <span class="proc-label">Mesh Repair &amp; Weld</span>
+          <button class="proc-help" type="button" aria-label="About mesh repair" aria-expanded="false"
+            aria-describedby="proc-tooltip" data-help="Snap nearby seam vertices, close open boundary holes, and optionally join disconnected sub-meshes to prepare game assets for printing.">i</button>
+        </span>
         <span class="status-badge badge-normal" id="repair-badge">OFF</span>
       </div>
 
@@ -1176,33 +1420,35 @@
         </label>
       </div>
 
-      <!-- Close Open Holes Sub-toggle -->
-      <div class="toggle-row" style="margin-bottom: 6px;">
-        <span class="toggle-text">Close Holes / Seal Openings</span>
-        <label class="switch" for="proc-close-holes" aria-label="Close Holes and Openings">
-          <input type="checkbox" id="proc-close-holes" checked>
-          <span class="slider"></span>
-        </label>
-      </div>
+      <div class="proc-dependent" data-enabled-by="proc-repair-toggle">
+        <!-- Close Open Holes Sub-toggle -->
+        <div class="toggle-row" style="margin-bottom: 6px;">
+          <span class="toggle-text">Close Holes / Seal Openings</span>
+          <label class="switch" for="proc-close-holes" aria-label="Close Holes and Openings">
+            <input type="checkbox" id="proc-close-holes" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
 
-      <!-- Join Disjoint Sub-Meshes Sub-toggle -->
-      <div class="toggle-row" style="margin-bottom: 6px;">
-        <span class="toggle-text">Join Disjoint Sub-Meshes</span>
-        <label class="switch" for="proc-join-submeshes" aria-label="Join Disjoint Sub-Meshes">
-          <input type="checkbox" id="proc-join-submeshes" checked>
-          <span class="slider"></span>
-        </label>
-      </div>
+        <!-- Join Disjoint Sub-Meshes Sub-toggle -->
+        <div class="toggle-row" style="margin-bottom: 6px;">
+          <span class="toggle-text">Join Disjoint Sub-Meshes</span>
+          <label class="switch" for="proc-join-submeshes" aria-label="Join Disjoint Sub-Meshes">
+            <input type="checkbox" id="proc-join-submeshes" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
 
-      <!-- Weld Distance / Snap Tolerance -->
-      <div class="proc-label-row" style="margin-top: 4px;">
-        <label for="proc-weld-slider" class="proc-tag">Weld Distance / Snap</label>
-        <span id="proc-weld-badge" style="font-size: 10px; color: var(--text-faint);">0.001</span>
-      </div>
-      <div class="proc-slider-row">
-        <input type="range" id="proc-weld-slider" min="0.0001" max="0.02" step="0.0005" value="0.001">
-        <input type="number" id="proc-weld-num" min="0.00001" max="0.5" step="0.0005" value="0.001"
-          class="proc-num-input" style="width: 58px;">
+        <!-- Weld Distance / Snap Tolerance -->
+        <div class="proc-label-row" style="margin-top: 4px;">
+          <label for="proc-weld-slider" class="proc-tag">Weld Distance / Snap</label>
+          <span id="proc-weld-badge" style="font-size: 10px; color: var(--text-faint);">0.001</span>
+        </div>
+        <div class="proc-slider-row">
+          <input type="range" id="proc-weld-slider" min="0.0001" max="0.02" step="0.0005" value="0.001">
+          <input type="number" id="proc-weld-num" min="0.00001" max="0.5" step="0.0005" value="0.001"
+            class="proc-num-input" style="width: 58px;">
+        </div>
       </div>
 
       <!-- Mesh Diagnostics Card -->
@@ -1231,100 +1477,7 @@
           </div>
         </div>
       </div>
-
-      <p class="proc-desc">Snaps disjoint seam vertices, closes open boundary holes, and heals disconnected game asset
-        meshes.</p>
-    </div>
-
-    <!-- Color Quantization Control -->
-    <div class="proc-section">
-      <div class="proc-label-row">
-        <span class="proc-label">Color Quantization</span>
-        <span class="status-badge badge-normal" id="quantize-badge">OFF</span>
       </div>
-
-      <!-- Enable / Disable Switch -->
-      <div class="toggle-row" style="margin-bottom: 6px;">
-        <span class="toggle-text">Enable Color Quantization</span>
-        <label class="switch" for="proc-quantize-toggle" aria-label="Toggle Color Quantization">
-          <input type="checkbox" id="proc-quantize-toggle">
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <!-- Linked Slider + Number Input -->
-      <div class="proc-label-row" style="margin-top: 4px;">
-        <span class="proc-tag">Filament Colors</span>
-        <button class="btn" id="proc-resample-btn" type="button"
-          style="padding: 2px 8px; font-size: 10px; height: 20px;">Resample</button>
-      </div>
-      <div class="proc-slider-row">
-        <input type="range" id="proc-colors-slider" min="2" max="24" step="1" value="5">
-        <input type="number" id="proc-colors-num" min="2" max="32" step="1" value="5" class="proc-num-input">
-      </div>
-
-      <!-- Despeckle (Min Island Size) with Linked Number Input -->
-      <div class="proc-label-row" style="margin-top: 8px;">
-        <label for="proc-despeckle-slider" class="proc-tag">Despeckle (Min Island)</label>
-        <span id="proc-despeckle-badge" style="font-size: 10px; color: var(--text-faint);">0 px (Off)</span>
-      </div>
-      <div class="proc-slider-row">
-        <input type="range" id="proc-despeckle-slider" min="0" max="500" step="10" value="0">
-        <input type="number" id="proc-despeckle-num" min="0" max="50000" step="10" value="0" class="proc-num-input"
-          style="width: 58px;">
-      </div>
-
-      <!-- Boundary Smoothing -->
-      <div class="proc-label-row" style="margin-top: 8px;">
-        <label for="proc-smooth-slider" class="proc-tag">Boundary Smoothing</label>
-        <span id="proc-smooth-badge" style="font-size: 10px; color: var(--text-faint);">Off</span>
-      </div>
-      <div class="proc-slider-row">
-        <input type="range" id="proc-smooth-slider" min="0" max="5" step="1" value="0">
-      </div>
-
-      <!-- Target Print Size -->
-      <div class="proc-label-row" style="margin-top: 8px;">
-        <label for="proc-size-num" class="proc-tag">Target Print Size</label>
-        <span style="font-size: 10px; color: var(--text-faint);">Max Dimension</span>
-      </div>
-      <div class="proc-slider-row">
-        <input type="number" id="proc-size-num" min="20" max="400" step="5" value="150" class="proc-num-input"
-          style="width: 70px;">
-        <span style="font-size: 11px; color: var(--text-dim);">mm</span>
-      </div>
-
-      <!-- Physical sampling resolution for the triangle-only Prusa paint format -->
-      <div class="proc-label-row" style="margin-top: 8px;">
-        <label for="proc-paint-resolution" class="proc-tag">Paint Detail</label>
-        <span style="font-size: 10px; color: var(--text-faint);">Surface resolution</span>
-      </div>
-      <div class="proc-slider-row">
-        <input type="number" id="proc-paint-resolution" min="0.10" max="2.00" step="0.05" value="0.25" class="proc-num-input"
-          style="width: 70px;">
-        <span style="font-size: 11px; color: var(--text-dim);">mm</span>
-      </div>
-      <p class="proc-desc">Smaller values preserve smoother projected texture edges, but increase 3MF size and export time.</p>
-
-      <!-- Palette Swatches Strip (Interactive Picker) -->
-      <div class="proc-label-row" style="margin-top: 8px;">
-        <span class="proc-tag">Custom Palette (Click to Edit)</span>
-      </div>
-      <div class="palette-swatches-container" id="proc-swatches-strip">
-        <span style="font-size: 10px; color: var(--text-faint);">Turn switch ON to quantize colors</span>
-      </div>
-      <p class="proc-desc">Click any swatch to pick custom filament colors. Turn OFF for original texture.</p>
-    </div>
-
-    <!-- Unified Export Trigger -->
-    <div class="proc-section proc-action-section">
-      <button class="btn btn-proc" id="export-processed-btn" aria-label="Export Model">
-        <svg viewBox="0 0 24 24">
-          <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
-        </svg>
-        <span>Export Model</span>
-      </button>
-    </div>
 
     <!-- Detected Textures Summary -->
     <div class="proc-section proc-textures-section" id="proc-textures-section">
@@ -1336,7 +1489,112 @@
         <div class="proc-texture-empty">No embedded textures detected</div>
       </div>
     </div>
+      </div>
+
+      <div class="proc-tab-panel" id="proc-panel-color" role="tabpanel" aria-labelledby="proc-tab-color" hidden>
+
+        <!-- Color Quantization Control -->
+        <div class="proc-section">
+          <div class="proc-label-row">
+            <span class="proc-label-with-help">
+              <span class="proc-label">Color Quantization</span>
+              <button class="proc-help" type="button" aria-label="About color quantization" aria-expanded="false"
+                aria-describedby="proc-tooltip" data-help="Reduce the texture to a printable filament palette. Despeckle removes tiny color islands, and boundary smoothing softens jagged transitions.">i</button>
+            </span>
+            <span class="status-badge badge-normal" id="quantize-badge">OFF</span>
+          </div>
+
+          <div class="toggle-row" style="margin-bottom: 6px;">
+            <span class="toggle-text">Enable Color Quantization</span>
+            <label class="switch" for="proc-quantize-toggle" aria-label="Toggle Color Quantization">
+              <input type="checkbox" id="proc-quantize-toggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="proc-dependent" data-enabled-by="proc-quantize-toggle">
+            <div class="proc-label-row" style="margin-top: 4px;">
+              <span class="proc-tag">Filament Colors</span>
+              <button class="btn" id="proc-resample-btn" type="button"
+                style="padding: 2px 8px; font-size: 10px; height: 20px;">Resample</button>
+            </div>
+            <div class="proc-slider-row">
+              <input type="range" id="proc-colors-slider" min="2" max="24" step="1" value="5">
+              <input type="number" id="proc-colors-num" min="2" max="32" step="1" value="5" class="proc-num-input">
+            </div>
+
+            <div class="proc-label-row" style="margin-top: 8px;">
+              <label for="proc-despeckle-slider" class="proc-tag">Despeckle (Min Island)</label>
+              <span id="proc-despeckle-badge" style="font-size: 10px; color: var(--text-faint);">0 px (Off)</span>
+            </div>
+            <div class="proc-slider-row">
+              <input type="range" id="proc-despeckle-slider" min="0" max="500" step="10" value="0">
+              <input type="number" id="proc-despeckle-num" min="0" max="50000" step="10" value="0" class="proc-num-input"
+                style="width: 58px;">
+            </div>
+
+            <div class="proc-label-row" style="margin-top: 8px;">
+              <label for="proc-smooth-slider" class="proc-tag">Boundary Smoothing</label>
+              <span id="proc-smooth-badge" style="font-size: 10px; color: var(--text-faint);">Off</span>
+            </div>
+            <div class="proc-slider-row">
+              <input type="range" id="proc-smooth-slider" min="0" max="5" step="1" value="0">
+            </div>
+          </div>
+
+          <div class="proc-label-row" style="margin-top: 8px;">
+            <span class="proc-tag">Custom Palette</span>
+          </div>
+          <div class="palette-swatches-container" id="proc-swatches-strip">
+            <span style="font-size: 10px; color: var(--text-faint);">Load a model to build a palette</span>
+          </div>
+        </div>
+
+        <div class="proc-section">
+          <div class="proc-label-row">
+            <span class="proc-label-with-help">
+              <span class="proc-label">Print Detail</span>
+              <button class="proc-help" type="button" aria-label="About print detail" aria-expanded="false"
+                aria-describedby="proc-tooltip" data-help="Target size sets the model's maximum printed dimension. Boundary accuracy is the maximum contour simplification error on the printed surface. Set it to 0 for an exact texel-boundary trace.">i</button>
+            </span>
+            <span class="proc-tag">3MF</span>
+          </div>
+
+          <div class="proc-label-row" style="margin-top: 4px;">
+            <label for="proc-size-num" class="proc-tag">Target Print Size</label>
+            <span style="font-size: 10px; color: var(--text-faint);">Max Dimension</span>
+          </div>
+          <div class="proc-slider-row">
+            <input type="number" id="proc-size-num" min="20" max="400" step="5" value="150" class="proc-num-input"
+              style="width: 70px;">
+            <span style="font-size: 11px; color: var(--text-dim);">mm</span>
+          </div>
+
+          <div class="proc-label-row" style="margin-top: 8px;">
+            <label for="proc-paint-resolution" class="proc-tag">Boundary Accuracy</label>
+            <span style="font-size: 10px; color: var(--text-faint);">Max Contour Error</span>
+          </div>
+          <div class="proc-slider-row">
+            <input type="number" id="proc-paint-resolution" min="0" max="2.00" step="0.05" value="0.10" class="proc-num-input"
+              style="width: 70px;">
+            <span style="font-size: 11px; color: var(--text-dim);">mm</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Unified Export Trigger stays visible across both tabs -->
+    <div class="proc-section proc-action-section">
+      <button class="btn btn-proc" id="export-processed-btn" aria-label="Export Model">
+        <svg viewBox="0 0 24 24">
+          <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+        </svg>
+        <span>Export Model</span>
+      </button>
+    </div>
   </aside>
+
+  <div class="proc-tooltip" id="proc-tooltip" role="tooltip" hidden></div>
 
   <!-- controls panel -->
   <div id="panel">
@@ -1414,6 +1672,9 @@
     import { Viewer } from './src/viewer.js';
     import {
       canonicalizeModel,
+      cloneModelForProcessing,
+      analyzeFloatingDecals,
+      bakeFloatingDecals,
       applyUvFlip,
       applyLiveColorQuantization,
       exportMultiColor3MF,
@@ -1421,7 +1682,6 @@
       linkGlbOriginalTextures,
       getModelTextures,
       applyLiveMeshRepair,
-      restoreOriginalMesh,
       analyzeMeshHealth
     } from './src/processor.js';
     import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
@@ -1458,6 +1718,10 @@
     const $procAlphaSlider = $('proc-alpha-slider');
     const $alphaBadge = $('alpha-status-badge');
     const $alphaSliderBadge = $('proc-alpha-badge');
+    const $decalBakeToggle = $('proc-decal-bake');
+    const $decalBakeBadge = $('decal-bake-badge');
+    const $decalMode = $('proc-decal-mode');
+    const $decalCandidateList = $('decal-candidate-list');
     const $procRepairToggle = $('proc-repair-toggle');
     const $procCloseHoles = $('proc-close-holes');
     const $procJoinSubmeshes = $('proc-join-submeshes');
@@ -1486,6 +1750,111 @@
     const $smoothSlider = $('proc-smooth-slider');
     const $smoothBadge = $('proc-smooth-badge');
     const $resampleBtn = $('proc-resample-btn');
+    const $procTabs = [...document.querySelectorAll('[data-proc-tab]')];
+    const $procTabPanels = [...document.querySelectorAll('.proc-tab-panel')];
+    const $procTooltip = $('proc-tooltip');
+
+    let activeHelpTrigger = null;
+    let helpIsPinned = false;
+
+    function hideProcessingHelp(force = false) {
+      if (helpIsPinned && !force) return;
+      if (activeHelpTrigger) activeHelpTrigger.setAttribute('aria-expanded', 'false');
+      activeHelpTrigger = null;
+      helpIsPinned = false;
+      $procTooltip.hidden = true;
+    }
+
+    function showProcessingHelp(trigger, pinned = false) {
+      if (activeHelpTrigger && activeHelpTrigger !== trigger) {
+        activeHelpTrigger.setAttribute('aria-expanded', 'false');
+      }
+
+      activeHelpTrigger = trigger;
+      helpIsPinned = pinned;
+      trigger.setAttribute('aria-expanded', 'true');
+      $procTooltip.textContent = trigger.dataset.help || '';
+      $procTooltip.hidden = false;
+
+      const triggerRect = trigger.getBoundingClientRect();
+      const tooltipRect = $procTooltip.getBoundingClientRect();
+      const edgeGap = 10;
+      let left = triggerRect.left;
+      let top = triggerRect.bottom + 8;
+
+      left = Math.max(edgeGap, Math.min(left, window.innerWidth - tooltipRect.width - edgeGap));
+      if (top + tooltipRect.height > window.innerHeight - edgeGap) {
+        top = triggerRect.top - tooltipRect.height - 8;
+      }
+      top = Math.max(edgeGap, top);
+
+      $procTooltip.style.left = `${left}px`;
+      $procTooltip.style.top = `${top}px`;
+    }
+
+    document.querySelectorAll('.proc-help').forEach(trigger => {
+      trigger.addEventListener('pointerenter', () => showProcessingHelp(trigger));
+      trigger.addEventListener('pointerleave', () => hideProcessingHelp());
+      trigger.addEventListener('focus', () => showProcessingHelp(trigger));
+      trigger.addEventListener('blur', () => hideProcessingHelp());
+      trigger.addEventListener('click', event => {
+        event.stopPropagation();
+        if (activeHelpTrigger === trigger && helpIsPinned) hideProcessingHelp(true);
+        else showProcessingHelp(trigger, true);
+      });
+    });
+
+    function setProcessingTab(tabName, moveFocus = false) {
+      hideProcessingHelp(true);
+      $procTabs.forEach(tab => {
+        const isActive = tab.dataset.procTab === tabName;
+        tab.setAttribute('aria-selected', String(isActive));
+        tab.tabIndex = isActive ? 0 : -1;
+        if (isActive && moveFocus) tab.focus();
+      });
+      $procTabPanels.forEach(panel => {
+        panel.hidden = panel.id !== `proc-panel-${tabName}`;
+      });
+    }
+
+    $procTabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => setProcessingTab(tab.dataset.procTab));
+      tab.addEventListener('keydown', event => {
+        let nextIndex = null;
+        if (event.key === 'ArrowRight') nextIndex = (index + 1) % $procTabs.length;
+        if (event.key === 'ArrowLeft') nextIndex = (index - 1 + $procTabs.length) % $procTabs.length;
+        if (event.key === 'Home') nextIndex = 0;
+        if (event.key === 'End') nextIndex = $procTabs.length - 1;
+        if (nextIndex === null) return;
+        event.preventDefault();
+        setProcessingTab($procTabs[nextIndex].dataset.procTab, true);
+      });
+    });
+
+    function syncDependentControls(toggle) {
+      document.querySelectorAll(`[data-enabled-by="${toggle.id}"]`).forEach(group => {
+        const enabled = toggle.checked && !toggle.disabled;
+        group.classList.toggle('is-disabled', !enabled);
+        group.querySelectorAll('input, select, button').forEach(control => {
+          control.disabled = !enabled;
+        });
+      });
+    }
+
+    function syncAllDependentControls() {
+      [$procAlphaToggle, $decalBakeToggle, $procRepairToggle, $quantizeToggle]
+        .forEach(syncDependentControls);
+    }
+
+    document.addEventListener('click', event => {
+      if (helpIsPinned && !event.target.closest('.proc-help')) hideProcessingHelp(true);
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') hideProcessingHelp(true);
+    });
+    window.addEventListener('resize', () => hideProcessingHelp(true));
+    document.querySelector('.proc-tab-panels').addEventListener('scroll', () => hideProcessingHelp(true));
+    syncAllDependentControls();
 
     let toastTimer;
     function toast(msg, cls = 'work', duration = 0) {
@@ -1502,6 +1871,9 @@
     let lastSourceGlbBuffer = null;
     let lastResourceUrls = [];
     let activePalette = [];
+    let sourceModelDocument = null;
+    let decalAnalysis = { components: [], candidates: [] };
+    let rebuildRevision = 0;
 
     function updateInfoDisplay(triangles) {
       if (!lastBaseName) return;
@@ -1751,15 +2123,192 @@
         const item = document.createElement('div');
         item.className = 'proc-texture-item';
         const cleanMime = (t.mimeType || 'embedded').replace('image/', '');
+        const dimensions = t.downsampled
+          ? `${t.sourceWidth}×${t.sourceHeight} → ${t.width}×${t.height}`
+          : (t.width ? `${t.width}×${t.height}` : 'active');
         item.innerHTML = `
       <span class="proc-texture-slot">${t.slot}</span>
       <div class="proc-texture-meta">
-        <span class="proc-texture-dim">${t.width ? `${t.width}×${t.height}` : 'active'}</span>
+        <span class="proc-texture-dim${t.downsampled ? ' reduced' : ''}"${t.downsampled ? ' title="Reduced proportionally to stay within the browser processing memory budget"' : ''}>${dimensions}</span>
         <span class="proc-texture-fmt">${cleanMime}</span>
       </div>
     `;
         $textureList.appendChild(item);
       }
+    }
+
+    async function waitForModelTextures(rootObject, timeoutMs = 5000) {
+      const pending = [];
+      rootObject?.traverse(child => {
+        if (!child.isMesh || !child.material) return;
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+        for (const material of materials) {
+          for (const texture of [material?.map, material?.alphaMap]) {
+            const image = texture?.image;
+            if (!image || image.width > 0 || image.complete) continue;
+            if (typeof image.addEventListener !== 'function') continue;
+            pending.push(new Promise(resolve => {
+              const done = () => resolve();
+              image.addEventListener('load', done, { once: true });
+              image.addEventListener('error', done, { once: true });
+            }));
+          }
+        }
+      });
+      if (!pending.length) return;
+      await Promise.race([
+        Promise.allSettled(pending),
+        new Promise(resolve => setTimeout(resolve, timeoutMs)),
+      ]);
+    }
+
+    function selectedDecalMappings() {
+      return [...$decalCandidateList.querySelectorAll('.decal-candidate')]
+        .map(row => ({
+          sourceId: row.querySelector('input[type=checkbox]')?.dataset.sourceId,
+          checked: row.querySelector('input[type=checkbox]')?.checked,
+          receiverId: row.querySelector('select')?.value,
+          mode: $decalMode.value,
+        }))
+        .filter(item => item.checked && item.sourceId && item.receiverId);
+    }
+
+    function renderDecalCandidates() {
+      $decalCandidateList.innerHTML = '';
+      if (!decalAnalysis.candidates.length) {
+        $decalCandidateList.innerHTML = '<div class="proc-texture-empty">No textured open sheets detected</div>';
+        $decalBakeToggle.checked = false;
+        $decalBakeToggle.disabled = true;
+        $decalBakeBadge.textContent = 'NONE';
+        $decalBakeBadge.className = 'status-badge badge-normal';
+        syncDependentControls($decalBakeToggle);
+        return;
+      }
+
+      $decalBakeToggle.disabled = false;
+      for (const candidate of decalAnalysis.candidates) {
+        const row = document.createElement('div');
+        row.className = 'decal-candidate';
+
+        const main = document.createElement('div');
+        main.className = 'decal-candidate-main';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = candidate.autoSelected;
+        checkbox.dataset.sourceId = candidate.id;
+        checkbox.setAttribute('aria-label', `Project ${candidate.label}`);
+
+        const name = document.createElement('span');
+        name.className = 'decal-candidate-name';
+        name.textContent = candidate.label;
+        name.title = `${candidate.label} · ${candidate.triangleCount.toLocaleString()} triangles`;
+
+        const confidence = document.createElement('span');
+        confidence.className = `decal-confidence ${candidate.confidence}`;
+        confidence.textContent = candidate.confidence;
+        main.append(checkbox, name, confidence);
+
+        const receiver = document.createElement('select');
+        receiver.className = 'decal-receiver';
+        receiver.setAttribute('aria-label', `Receiving surface for ${candidate.label}`);
+        for (const component of decalAnalysis.components) {
+          if (component.id === candidate.id) continue;
+          const option = document.createElement('option');
+          option.value = component.id;
+          option.textContent = `Onto: ${component.label}`;
+          option.selected = component.id === candidate.receiverId;
+          receiver.appendChild(option);
+        }
+
+        const rebuildIfActive = () => {
+          if ($decalBakeToggle.checked) rebuildProcessedModel({ reason: 'Updated decal projection' });
+        };
+        checkbox.addEventListener('change', rebuildIfActive);
+        receiver.addEventListener('change', rebuildIfActive);
+        row.append(main, receiver);
+        $decalCandidateList.appendChild(row);
+      }
+      syncDependentControls($decalBakeToggle);
+    }
+
+    async function rebuildProcessedModel({ forceResample = false, reason = '' } = {}) {
+      if (!sourceModelDocument) return null;
+      const revision = ++rebuildRevision;
+      const nextModel = cloneModelForProcessing(sourceModelDocument);
+      const flipped = $procUvFlip.checked;
+      applyUvFlip(nextModel, flipped);
+
+      let decalResult = null;
+      if ($decalBakeToggle.checked) {
+        const mappings = selectedDecalMappings();
+        $decalBakeBadge.textContent = mappings.length ? 'BAKING' : 'NONE SELECTED';
+        $decalBakeBadge.className = 'status-badge badge-warn';
+        if (mappings.length) {
+          decalResult = await bakeFloatingDecals(nextModel, mappings, {
+            alphaThreshold: $procAlphaToggle.checked ? parseFloat($procAlphaSlider.value || '0.5') : 0,
+            alphaCutout: $procAlphaToggle.checked,
+            projectionMode: $decalMode.value,
+          });
+        }
+      }
+      if (revision !== rebuildRevision) return null;
+
+      let repairResult = null;
+      if ($procRepairToggle.checked) {
+        repairResult = applyLiveMeshRepair(nextModel, {
+          enabled: true,
+          tolerance: parseFloat($weldNum.value || '0.001'),
+          closeHoles: $procCloseHoles.checked,
+          joinSubmeshes: $procJoinSubmeshes.checked,
+        });
+      }
+
+      const enabled = $quantizeToggle.checked;
+      const numColors = parseInt($colorsNum.value || '5', 10);
+      const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
+      const smoothLevel = parseInt($smoothSlider.value || '0', 10);
+      if (forceResample) activePalette = [];
+      activePalette = applyLiveColorQuantization(
+        nextModel,
+        numColors,
+        enabled,
+        (!forceResample && activePalette.length > 0) ? activePalette : null,
+        despeckleSize,
+        smoothLevel,
+        forceResample
+      );
+      if (revision !== rebuildRevision) return null;
+
+      const { triangles } = viewer.replaceObject(nextModel, { frame: false, uvFlipped: flipped });
+      updateInfoDisplay(triangles);
+      updateTextureListUI();
+      renderSwatches(activePalette);
+      syncDependentControls($quantizeToggle);
+      updateMeshDiagnostics();
+
+      if ($decalBakeToggle.checked) {
+        const baked = decalResult?.baked || 0;
+        $decalBakeBadge.textContent = baked ? `${baked} BAKED` : 'NO HITS';
+        $decalBakeBadge.className = 'status-badge ' + (baked ? 'badge-ok' : 'badge-warn');
+      } else {
+        $decalBakeBadge.textContent = 'OFF';
+        $decalBakeBadge.className = 'status-badge badge-normal';
+      }
+
+      if ($procRepairToggle.checked && repairResult) {
+        $repairBadge.textContent = repairResult.isWatertight ? 'SEALED' : 'WELDED';
+        $repairBadge.className = 'status-badge ' + (repairResult.isWatertight ? 'badge-ok' : 'badge-warn');
+      } else {
+        $repairBadge.textContent = 'OFF';
+        $repairBadge.className = 'status-badge badge-normal';
+      }
+
+      if (reason) {
+        const failures = decalResult?.details?.filter(detail => detail.error || detail.pixels === 0).length || 0;
+        const suffix = failures ? ` · ${failures} sheet${failures === 1 ? '' : 's'} could not be projected` : '';
+        toast(`${reason}${suffix}`, failures ? 'work' : 'ok', 2200);
+      }
+      return { decalResult, repairResult, triangles };
     }
 
     async function handleFiles(fileList) {
@@ -1825,7 +2374,9 @@
         }
 
         canonicalizeModel(loaded.object);
+        await waitForModelTextures(loaded.object);
         const { triangles } = viewer.loadObject(loaded.object);
+        sourceModelDocument = cloneModelForProcessing(viewer.currentModel);
         revokeUrls(lastResourceUrls);
         lastResourceUrls = resources.urls;
         lastSourceGlbBuffer = loaded.sourceGlbBuffer ?? null;
@@ -1838,12 +2389,20 @@
         $uvBadge.className = 'status-badge badge-normal';
         $procAlphaToggle.checked = true;
         $procAlphaSlider.value = '0.5';
+        viewer.setAlphaCutout(true);
+        viewer.setAlphaTest(0.5);
         $alphaBadge.textContent = 'CUTOUT (0.5)';
         $alphaBadge.className = 'status-badge badge-active';
         $alphaSliderBadge.textContent = '0.50';
+        $decalBakeToggle.checked = false;
+        $decalMode.value = 'auto';
+        decalAnalysis = analyzeFloatingDecals(sourceModelDocument);
+        renderDecalCandidates();
         $procBadge.textContent = lastLoadedFormat;
         updateTextureListUI();
         $procToolbar.classList.add('show');
+        $procBtn.setAttribute('aria-expanded', 'true');
+        syncAllDependentControls();
 
         // Analyze mesh health and apply repair if toggle is active
         updateMeshDiagnostics();
@@ -1945,7 +2504,7 @@
         const isEnabled = $quantizeToggle.checked;
         const numColors = parseInt($colorsNum.value || '5', 10);
         const targetSizeMm = parseFloat($('proc-size-num')?.value || '150');
-        const paintResolutionMm = parseFloat($('proc-paint-resolution')?.value || '0.25');
+        const paintResolutionMm = parseFloat($('proc-paint-resolution')?.value || '0.10');
         const isUvFlipped = viewer.isUvFlipped();
         const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
         const smoothLevel = parseInt($smoothSlider.value || '0', 10);
@@ -1963,7 +2522,7 @@
         );
         const bake = viewer.currentModel._lastPaintBake;
         if (bake?.refinementLimited) {
-          toast(`Paint bake reached its ${bake.triangleCount.toLocaleString()}-triangle safety limit; use a larger Paint Detail value for a complete bake.`, 'work', 5000);
+          toast(`Paint bake reached its ${bake.triangleCount.toLocaleString()}-triangle safety limit; use a larger Boundary Accuracy value for a complete bake.`, 'work', 5000);
         }
         return {
           data,
@@ -2052,19 +2611,7 @@
           const b = parseInt(newHex.slice(5, 7), 16);
           activePalette[idx] = [r, g, b];
 
-          const enabled = $quantizeToggle.checked;
-          const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
-          const smoothLevel = parseInt($smoothSlider.value || '0', 10);
-
-          // Update palette in memory; if enabled, update viewport in real time
-          applyLiveColorQuantization(
-            viewer.currentModel,
-            activePalette.length,
-            enabled,
-            activePalette,
-            despeckleSize,
-            smoothLevel
-          );
+          rebuildProcessedModel();
         });
 
         label.appendChild(picker);
@@ -2075,7 +2622,7 @@
     let quantizeTimer;
     function updateQuantization(forceResample = false) {
       clearTimeout(quantizeTimer);
-      quantizeTimer = setTimeout(() => {
+      quantizeTimer = setTimeout(async () => {
         const enabled = $quantizeToggle.checked;
         const numColors = parseInt($colorsNum.value || '5', 10);
         const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
@@ -2087,19 +2634,7 @@
         $despeckleBadge.textContent = despeckleSize === 0 ? '0 px (Off)' : `${despeckleSize} px`;
         $smoothBadge.textContent = smoothLevel === 0 ? 'Off' : `Level ${smoothLevel}`;
 
-        // If explicitly forcing a resample, wipe local activePalette
-        if (forceResample) activePalette = [];
-
-        activePalette = applyLiveColorQuantization(
-          viewer.currentModel,
-          numColors,
-          enabled,
-          (!forceResample && activePalette.length > 0) ? activePalette : null,
-          despeckleSize,
-          smoothLevel,
-          forceResample
-        );
-        renderSwatches(activePalette);
+        await rebuildProcessedModel({ forceResample });
       }, 30);
     }
 
@@ -2152,31 +2687,31 @@
 
     // Toggle preview on/off
     $quantizeToggle.addEventListener('change', () => {
+      syncDependentControls($quantizeToggle);
       updateQuantization(false);
     });
 
     // UV Orientation toggle listener
     $procUvFlip.addEventListener('change', e => {
       const flipped = e.target.checked;
-      viewer.setUvFlipped(flipped);
-      applyUvFlip(viewer.currentModel, flipped);
       $uvBadge.textContent = flipped ? 'FLIPPED' : 'NORMAL';
       $uvBadge.className = 'status-badge ' + (flipped ? 'badge-warn' : 'badge-normal');
-      toast(flipped ? 'Inverted Vertical UV (Flip Y)' : 'Standard Vertical UV', 'ok', 1500);
-
-      if ($quantizeToggle.checked) {
-        updateQuantization(false);
-      }
+      rebuildProcessedModel({ reason: flipped ? 'Inverted vertical UV' : 'Restored standard UVs' });
     });
 
     // Decals & Alpha Cutout listeners
     $procAlphaToggle.addEventListener('change', e => {
       const enabled = e.target.checked;
+      syncDependentControls($procAlphaToggle);
       viewer.setAlphaCutout(enabled);
       const testVal = parseFloat($procAlphaSlider.value || '0.5');
       $alphaBadge.textContent = enabled ? `CUTOUT (${testVal.toFixed(1)})` : 'OFF';
       $alphaBadge.className = 'status-badge ' + (enabled ? 'badge-active' : 'badge-normal');
-      toast(enabled ? `Decal cutout enabled (${testVal.toFixed(2)})` : 'Decal cutout disabled', 'ok', 1500);
+      if ($decalBakeToggle.checked) {
+        rebuildProcessedModel({ reason: enabled ? 'Updated decal cutout' : 'Baking full decal textures' });
+      } else {
+        toast(enabled ? `Decal cutout enabled (${testVal.toFixed(2)})` : 'Decal cutout disabled', 'ok', 1500);
+      }
     });
 
     $procAlphaSlider.addEventListener('input', e => {
@@ -2187,6 +2722,18 @@
         $alphaBadge.textContent = `CUTOUT (${val.toFixed(1)})`;
         $alphaBadge.className = 'status-badge badge-active';
       }
+      if ($decalBakeToggle.checked) rebuildProcessedModel();
+    });
+
+    $decalBakeToggle.addEventListener('change', () => {
+      syncDependentControls($decalBakeToggle);
+      rebuildProcessedModel({
+        reason: $decalBakeToggle.checked ? 'Projected selected sheets into the model' : 'Restored floating sheets'
+      });
+    });
+
+    $decalMode.addEventListener('change', () => {
+      if ($decalBakeToggle.checked) rebuildProcessedModel({ reason: 'Changed decal projection direction' });
     });
 
     // ── Mesh Repair & Sealing Logic ──────────────────────────────────────────
@@ -2230,55 +2777,16 @@
     function updateMeshRepair(showToast = true) {
       clearTimeout(repairTimer);
       repairTimer = setTimeout(() => {
-        if (!viewer.currentModel) return;
-        const enabled = $procRepairToggle.checked;
-        const closeHoles = $procCloseHoles.checked;
-        const joinSubmeshes = $procJoinSubmeshes.checked;
-        const tol = parseFloat($weldNum.value || '0.001');
-
-        if (!enabled) {
-          restoreOriginalMesh(viewer.currentModel);
-          viewer.applyMaterialSettings();
-          const triCount = viewer.countTriangles(viewer.currentModel);
-          updateInfoDisplay(triCount);
-          updateMeshDiagnostics();
-          $repairBadge.textContent = 'OFF';
-          $repairBadge.className = 'status-badge badge-normal';
-          if (showToast) toast('Mesh restored to original', 'work', 1500);
-          if ($quantizeToggle.checked) updateQuantization(false);
-          return;
-        }
-
-        const res = applyLiveMeshRepair(viewer.currentModel, {
-          enabled: true,
-          tolerance: tol,
-          closeHoles,
-          joinSubmeshes
+        rebuildProcessedModel({
+          reason: showToast
+            ? ($procRepairToggle.checked ? 'Rebuilt the model with mesh repair' : 'Restored the unrepaired model')
+            : ''
         });
-
-        viewer.applyMaterialSettings();
-        const triCount = viewer.countTriangles(viewer.currentModel);
-        updateInfoDisplay(triCount);
-
-        $repairBadge.textContent = res.isWatertight ? 'SEALED' : 'WELDED';
-        $repairBadge.className = 'status-badge ' + (res.isWatertight ? 'badge-ok' : 'badge-warn');
-
-        $diagStatus.textContent = res.isWatertight ? '● Sealed Watertight' : `● ${res.openEdgesAfter} Open Edges`;
-        $diagStatus.className = 'repair-diag-status ' + (res.isWatertight ? 'ok' : 'warn');
-        $diagOpenEdges.textContent = res.openEdgesAfter.toLocaleString();
-        $diagWelded.textContent = res.weldedVertices.toLocaleString();
-        $diagHoles.textContent = res.holesClosed > 0 ? `${res.holesClosed} sealed` : '0';
-
-        if (showToast) {
-          const msg = `Repaired: ${res.weldedVertices.toLocaleString()} vertices welded${res.holesClosed > 0 ? `, ${res.holesClosed} holes sealed (+${res.addedTriangles} tris)` : ''}`;
-          toast(msg, 'ok', 3000);
-        }
-
-        if ($quantizeToggle.checked) updateQuantization(false);
       }, 30);
     }
 
     $procRepairToggle.addEventListener('change', () => {
+      syncDependentControls($procRepairToggle);
       updateMeshRepair(true);
     });
 
@@ -2337,7 +2845,11 @@
     });
 
     // Processing toolbar toggle
-    $procBtn.addEventListener('click', () => $procToolbar.classList.toggle('show'));
+    $procBtn.addEventListener('click', () => {
+      const isOpen = $procToolbar.classList.toggle('show');
+      $procBtn.setAttribute('aria-expanded', String(isOpen));
+      if (!isOpen) hideProcessingHelp(true);
+    });
 
     $procFormat.addEventListener('change', e => {
       const val = e.target.value;
