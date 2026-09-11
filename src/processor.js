@@ -2467,35 +2467,170 @@ function interiorPaintPolygonPoint(polygon) {
   return polygon[0];
 }
 
-function restorePaintBoundaryVertices(points, triangles, boundaryLoops) {
-  const referenced = new Set(triangles.flat());
-  for (const loop of boundaryLoops) {
-    for (const pointIndex of loop) {
-      if (referenced.has(pointIndex)) continue;
-      const point = points[pointIndex];
-      let inserted = false;
-      for (let triangleIndex = 0; triangleIndex < triangles.length && !inserted; triangleIndex++) {
-        const triangle = triangles[triangleIndex];
-        for (let edge = 0; edge < 3; edge++) {
-          const aIndex = triangle[edge];
-          const bIndex = triangle[(edge + 1) % 3];
-          const a = points[aIndex];
-          const b = points[bIndex];
-          const cross = Math.abs((point[0] - a[0]) * (b[1] - a[1]) - (point[1] - a[1]) * (b[0] - a[0]));
-          const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
-          const dot = (point[0] - a[0]) * (point[0] - b[0]) + (point[1] - a[1]) * (point[1] - b[1]);
-          if (cross > 1e-8 * Math.max(1, length) || dot >= -1e-12) continue;
-          const opposite = triangle[(edge + 2) % 3];
-          triangles[triangleIndex] = [aIndex, pointIndex, opposite];
-          triangles.push([pointIndex, bIndex, opposite]);
-          referenced.add(pointIndex);
-          inserted = true;
-          break;
-        }
-      }
+function conformPaintTriangleJunctions(triangles) {
+  const pointKey = point => `${Math.round(point[0] * 1e9)}_${Math.round(point[1] * 1e9)}`;
+  const edgeKey = (a, b) => {
+    const ka = pointKey(a);
+    const kb = pointKey(b);
+    return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+  };
+  const lineKey = (a, b) => {
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    const length = Math.hypot(dx, dy);
+    if (length <= 1e-14) return null;
+    dx /= length;
+    dy /= length;
+    if (dx < -1e-12 || (Math.abs(dx) <= 1e-12 && dy < 0)) {
+      dx = -dx;
+      dy = -dy;
+    }
+    const normalX = -dy;
+    const normalY = dx;
+    const offset = normalX * a[0] + normalY * a[1];
+    return `${Math.round(dx * 1e8)}_${Math.round(dy * 1e8)}_${Math.round(offset * 1e8)}`;
+  };
+
+  const edgeRecords = new Map();
+  for (let triangleIndex = 0; triangleIndex < triangles.length; triangleIndex++) {
+    const triangle = triangles[triangleIndex];
+    for (let edge = 0; edge < 3; edge++) {
+      const a = triangle.points[edge];
+      const b = triangle.points[(edge + 1) % 3];
+      const key = edgeKey(a, b);
+      if (!edgeRecords.has(key)) edgeRecords.set(key, []);
+      edgeRecords.get(key).push({ triangleIndex, edge, a, b });
     }
   }
-  return triangles;
+
+  // A T-junction appears as multiple unmatched, collinear edges whose spans
+  // overlap. Grouping only unmatched edges avoids touching ordinary internal
+  // diagonals and lets every side adopt the union of the boundary endpoints.
+  const lineGroups = new Map();
+  for (const records of edgeRecords.values()) {
+    if (records.length !== 1) continue;
+    const record = records[0];
+    const key = lineKey(record.a, record.b);
+    if (!key) continue;
+    if (!lineGroups.has(key)) lineGroups.set(key, new Map());
+    const points = lineGroups.get(key);
+    points.set(pointKey(record.a), record.a);
+    points.set(pointKey(record.b), record.b);
+  }
+
+  const result = [];
+  for (const triangle of triangles) {
+    const boundary = [];
+    let subdivided = false;
+    for (let edge = 0; edge < 3; edge++) {
+      const a = triangle.points[edge];
+      const b = triangle.points[(edge + 1) % 3];
+      boundary.push(a);
+      const records = edgeRecords.get(edgeKey(a, b));
+      if (records?.length !== 1) continue;
+      const candidates = lineGroups.get(lineKey(a, b));
+      if (!candidates || candidates.size <= 2) continue;
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const lengthSquared = dx * dx + dy * dy;
+      const interior = [];
+      for (const point of candidates.values()) {
+        const t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / lengthSquared;
+        if (t <= 1e-9 || t >= 1 - 1e-9) continue;
+        const projectedX = a[0] + t * dx;
+        const projectedY = a[1] + t * dy;
+        if (Math.hypot(point[0] - projectedX, point[1] - projectedY) > 1e-8) continue;
+        interior.push({ point, t });
+      }
+      interior.sort((left, right) => left.t - right.t);
+      let lastKey = null;
+      for (const entry of interior) {
+        const key = pointKey(entry.point);
+        if (key === lastKey) continue;
+        boundary.push(entry.point);
+        lastKey = key;
+        subdivided = true;
+      }
+    }
+    if (!subdivided) {
+      result.push(triangle);
+      continue;
+    }
+    const center = [
+      (triangle.points[0][0] + triangle.points[1][0] + triangle.points[2][0]) / 3,
+      (triangle.points[0][1] + triangle.points[1][1] + triangle.points[2][1]) / 3,
+    ];
+    for (let index = 0; index < boundary.length; index++) {
+      const a = boundary[index];
+      const b = boundary[(index + 1) % boundary.length];
+      if (pointKey(a) === pointKey(b)) continue;
+      result.push({ points: [a, b, center], samplePoint: triangle.samplePoint });
+    }
+  }
+  return result;
+}
+
+function conformPaintSourceBoundary(triangles, boundaryPoints) {
+  // Adjacent source faces can have unrelated UVs and therefore discover
+  // different paint intersections along the same physical mesh edge. The
+  // shared boundaryPoints list is their union; force every face to retain that
+  // exact split sequence so the final spatial weld cannot leave T-junctions.
+  const pointKey = point => `${Math.round(point[0] * 1e9)}_${Math.round(point[1] * 1e9)}`;
+  const boundaryIndexForEdge = (a, b) => {
+    const epsilon = 1e-8;
+    if (Math.abs(a[1]) <= epsilon && Math.abs(b[1]) <= epsilon) return 0;
+    if (Math.abs(a[0] + a[1] - 1) <= epsilon && Math.abs(b[0] + b[1] - 1) <= epsilon) return 1;
+    if (Math.abs(a[0]) <= epsilon && Math.abs(b[0]) <= epsilon) return 2;
+    return -1;
+  };
+  const result = [];
+  for (const triangle of triangles) {
+    const boundary = [];
+    let subdivided = false;
+    for (let edge = 0; edge < 3; edge++) {
+      const a = triangle.points[edge];
+      const b = triangle.points[(edge + 1) % 3];
+      boundary.push(a);
+      const boundaryIndex = boundaryIndexForEdge(a, b);
+      if (boundaryIndex < 0) continue;
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const lengthSquared = dx * dx + dy * dy;
+      const interior = [];
+      for (const point of boundaryPoints[boundaryIndex]) {
+        const t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / lengthSquared;
+        if (t <= 1e-9 || t >= 1 - 1e-9) continue;
+        const projectedX = a[0] + t * dx;
+        const projectedY = a[1] + t * dy;
+        if (Math.hypot(point[0] - projectedX, point[1] - projectedY) > 1e-8) continue;
+        interior.push({ point, t });
+      }
+      interior.sort((left, right) => left.t - right.t);
+      let lastKey = null;
+      for (const entry of interior) {
+        const key = pointKey(entry.point);
+        if (key === lastKey) continue;
+        boundary.push(entry.point);
+        lastKey = key;
+        subdivided = true;
+      }
+    }
+    if (!subdivided) {
+      result.push(triangle);
+      continue;
+    }
+    const center = [
+      (triangle.points[0][0] + triangle.points[1][0] + triangle.points[2][0]) / 3,
+      (triangle.points[0][1] + triangle.points[1][1] + triangle.points[2][1]) / 3,
+    ];
+    for (let index = 0; index < boundary.length; index++) {
+      const a = boundary[index];
+      const b = boundary[(index + 1) % boundary.length];
+      if (pointKey(a) === pointKey(b)) continue;
+      result.push({ points: [a, b, center], samplePoint: triangle.samplePoint });
+    }
+  }
+  return result;
 }
 
 function triangulatePaintGraph(textureSegments, boundaryPoints) {
@@ -2587,17 +2722,8 @@ function triangulatePaintGraph(textureSegments, boundaryPoints) {
   for (const shell of shells) {
     const contour = shell.points.map(point => new THREE.Vector2(point[0], point[1]));
     const holeVectors = shell.holes.map(hole => hole.points.map(point => new THREE.Vector2(point[0], point[1])));
-    let triangles = THREE.ShapeUtils.triangulateShape(contour, holeVectors);
+    const triangles = THREE.ShapeUtils.triangulateShape(contour, holeVectors);
     const flattened = shell.points.concat(...shell.holes.map(hole => hole.points));
-    const boundaryLoops = [];
-    let offset = 0;
-    boundaryLoops.push(shell.points.map((_, index) => offset + index));
-    offset += shell.points.length;
-    for (const hole of shell.holes) {
-      boundaryLoops.push(hole.points.map((_, index) => offset + index));
-      offset += hole.points.length;
-    }
-    triangles = restorePaintBoundaryVertices(flattened, triangles, boundaryLoops);
     if (triangles.length === 0) continue;
     const sampleTriangle = triangles[0].map(index => flattened[index]);
     const samplePoint = [
@@ -2609,7 +2735,7 @@ function triangulatePaintGraph(textureSegments, boundaryPoints) {
       if (Math.abs(polygonArea2D(points)) > 1e-14) result.push({ points, samplePoint });
     }
   }
-  return result;
+  return conformPaintTriangleJunctions(result);
 }
 
 /**
@@ -2882,8 +3008,11 @@ export async function exportMultiColor3MF(
   // 4. TRACE THE DISCRETE TEXTURE BOUNDARIES, THEN CONSTRAIN THE MESH TO THEM.
   // Unlike probe-based midpoint subdivision, this preserves enclosed features
   // and spends triangles on contours instead of uniformly across painted areas.
+  const exportCoordinateFactor = 1000000;
+  const exportCoordinateDecimals = 6;
+
   function getPosKey(x, y, z) {
-    return `${Math.round(x * 1000)}_${Math.round(y * 1000)}_${Math.round(z * 1000)}`;
+    return `${Math.round(x * exportCoordinateFactor)}_${Math.round(y * exportCoordinateFactor)}_${Math.round(z * exportCoordinateFactor)}`;
   }
 
   function getEdgeKey(pA, pB) {
@@ -2973,6 +3102,10 @@ export async function exportMultiColor3MF(
         (sum, region) => sum + Math.abs(polygonArea2D(region.points)), 0
       );
     }
+    localTriangles = conformPaintSourceBoundary(localTriangles, sourceBoundaryPoints);
+    coveredArea = localTriangles.reduce(
+      (sum, region) => sum + Math.abs(polygonArea2D(region.points)), 0
+    );
     sourceTri.exactPaintBoundarySegments = null;
     const hasSharedEdgeSplits = sourceBoundaryPoints.some(points => points.length > 2);
     if (localTriangles.length === 0 && sourceTri.paintBoundarySegments.length === 0 && !hasSharedEdgeSplits) {
@@ -3013,12 +3146,11 @@ export async function exportMultiColor3MF(
   // 5. WELD VERTICES AND EMIT WATERTIGHT MULTI-MATERIAL 3MF MESH
   const coordMap = new Map();
   const weldedVertices = [];
-  const factor = 1000;
 
   function getOrAddWeldedVertex(x, y, z) {
-    const ix = Math.round(x * factor);
-    const iy = Math.round(y * factor);
-    const iz = Math.round(z * factor);
+    const ix = Math.round(x * exportCoordinateFactor);
+    const iy = Math.round(y * exportCoordinateFactor);
+    const iz = Math.round(z * exportCoordinateFactor);
     const key = `${ix}_${iy}_${iz}`;
     if (coordMap.has(key)) {
       return coordMap.get(key);
@@ -3070,7 +3202,7 @@ export async function exportMultiColor3MF(
   let verticesXml = '';
   for (let i = 0; i < weldedVertices.length; i++) {
     const v = weldedVertices[i];
-    verticesXml += `<vertex x="${v[0].toFixed(3)}" y="${v[1].toFixed(3)}" z="${v[2].toFixed(3)}" />\n`;
+    verticesXml += `<vertex x="${v[0].toFixed(exportCoordinateDecimals)}" y="${v[1].toFixed(exportCoordinateDecimals)}" z="${v[2].toFixed(exportCoordinateDecimals)}" />\n`;
   }
 
   const toHex = c => c.map(v => v.toString(16).padStart(2, '0')).join('').toUpperCase();

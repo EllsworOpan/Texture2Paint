@@ -9,7 +9,7 @@ import {
   planTextureWorkingSizes,
 } from '../src/processor.js';
 
-function createQuantizedSquareRoot(labels, width, height) {
+function createQuantizedMaterial(labels, width, height) {
   const rgba = new Uint8ClampedArray(width * height * 4);
   for (let pixel = 0; pixel < width * height; pixel++) {
     const value = labels[pixel] ? 255 : 0;
@@ -32,6 +32,11 @@ function createQuantizedSquareRoot(labels, width, height) {
   material._quantizedLabelsHeight = height;
   material._quantizationEnabled = true;
   material._quantizedPalette = [[0, 0, 0], [255, 255, 255]];
+  return material;
+}
+
+function createQuantizedSquareRoot(labels, width, height) {
+  const material = createQuantizedMaterial(labels, width, height);
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute([
@@ -53,9 +58,21 @@ function createQuantizedSquareRoot(labels, width, height) {
   return root;
 }
 
-async function exportedModelXml(root, toleranceMm) {
+function assertNoUnmatchedSquareInteriorEdges(modelXml) {
+  const { vertices, edgeUses } = inspectPaintMesh(modelXml);
+  for (const [key, uses] of edgeUses) {
+    if (uses !== 1) continue;
+    const [aIndex, bIndex] = key.split('|').map(Number);
+    const midpoint = vertices[aIndex].map((value, axis) => (value + vertices[bIndex][axis]) * 0.5);
+    const onOuterBoundary = Math.abs(midpoint[0]) < 1e-8 || Math.abs(midpoint[0] - 10) < 1e-8 ||
+      Math.abs(midpoint[2]) < 1e-8 || Math.abs(midpoint[2] - 10) < 1e-8;
+    assert.ok(onOuterBoundary, `unexpected unmatched interior edge ${key}`);
+  }
+}
+
+async function exportedModelXml(root, toleranceMm, targetSizeMm = 10) {
   const archive = await exportMultiColor3MF(
-    root, 2, true, 10, false, root._quantizedPalette, 0, 0, toleranceMm
+    root, 2, true, targetSizeMm, false, root._quantizedPalette, 0, 0, toleranceMm
   );
   return strFromU8(unzipSync(new Uint8Array(archive))['3D/3dmodel.model']);
 }
@@ -186,6 +203,78 @@ test('3MF exact tracing handles checkerboard contour junctions without overlaps'
   const { areaByColor } = inspectPaintMesh(modelXml);
   assert.ok(Math.abs((areaByColor.get(1) || 0) - 50) < 1e-6);
   assert.ok(Math.abs((areaByColor.get(2) || 0) - 50) < 1e-6);
+});
+
+test('3MF tracing preserves the shared split sequence across UV seams', async () => {
+  const width = 48;
+  const height = 48;
+  const firstLabels = new Uint8Array(width * height);
+  const secondLabels = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      firstLabels[y * width + x] = (x + y) % 3 === 0 ? 1 : 0;
+      secondLabels[y * width + x] = (x * 2 + y * 3) % 5 < 2 ? 1 : 0;
+    }
+  }
+  const materials = [
+    createQuantizedMaterial(firstLabels, width, height),
+    createQuantizedMaterial(secondLabels, width, height),
+  ];
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    0, 0, 0, 1, 0, 0, 1, 1, 0,
+    0, 0, 0, 1, 1, 0, 0, 1, 0,
+  ], 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute([
+    0, 0, 1, 0, 1, 1,
+    0, 0, 1, 0, 0, 1,
+  ], 2));
+  geometry.addGroup(0, 3, 0);
+  geometry.addGroup(3, 3, 1);
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(geometry, materials));
+  root._quantizedPalette = materials[0]._quantizedPalette;
+
+  const modelXml = await exportedModelXml(root, 0.1);
+  assertNoUnmatchedSquareInteriorEdges(modelXml);
+});
+
+test('3MF tracing keeps a closed UV-seamed mesh two-manifold', async () => {
+  const labels = new Uint8Array([
+    0, 0, 0, 0,
+    0, 1, 1, 0,
+    0, 1, 1, 0,
+    0, 0, 0, 0,
+  ]);
+  const root = createQuantizedSquareRoot(labels, 4, 4);
+  root.children[0].geometry = new THREE.BoxGeometry(1, 1, 1);
+  const modelXml = await exportedModelXml(root, 0);
+  const { edgeUses } = inspectPaintMesh(modelXml);
+  for (const [edge, uses] of edgeUses) {
+    assert.equal(uses, 2, `closed-mesh edge ${edge} should have exactly two incident faces`);
+  }
+});
+
+test('3MF tracing does not collapse sub-millimeter contour triangles during welding', async () => {
+  const labels = new Uint8Array([
+    0, 0, 0, 0,
+    0, 1, 1, 0,
+    0, 1, 1, 0,
+    0, 0, 0, 0,
+  ]);
+  const root = createQuantizedSquareRoot(labels, 4, 4);
+  const modelXml = await exportedModelXml(root, 0, 0.002);
+  const { vertices, areaByColor, edgeUses } = inspectPaintMesh(modelXml);
+  assert.ok(Math.abs((areaByColor.get(1) || 0) - 0.000003) < 1e-12);
+  assert.ok(Math.abs((areaByColor.get(2) || 0) - 0.000001) < 1e-12);
+  for (const [key, uses] of edgeUses) {
+    if (uses !== 1) continue;
+    const [aIndex, bIndex] = key.split('|').map(Number);
+    const midpoint = vertices[aIndex].map((value, axis) => (value + vertices[bIndex][axis]) * 0.5);
+    const onOuterBoundary = Math.abs(midpoint[0]) < 1e-10 || Math.abs(midpoint[0] - 0.002) < 1e-10 ||
+      Math.abs(midpoint[2]) < 1e-10 || Math.abs(midpoint[2] - 0.002) < 1e-10;
+    assert.ok(onOuterBoundary, `unexpected unmatched precision-sensitive edge ${key}`);
+  }
 });
 
 test('applyUvFlip correctly inverts Y coordinates and restores original on unflip', () => {
