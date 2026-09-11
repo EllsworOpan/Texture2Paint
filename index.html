@@ -626,6 +626,61 @@
       gap: 6px;
     }
 
+    .proc-advanced {
+      border-top: 1px solid rgba(255, 255, 255, .07);
+      padding-top: 10px;
+    }
+
+    .proc-advanced summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 28px;
+      color: var(--text-dim);
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+
+    .proc-advanced summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .proc-advanced summary::after {
+      content: '\203A';
+      font-size: 18px;
+      line-height: 1;
+      transition: transform .15s;
+    }
+
+    .proc-advanced[open] summary::after {
+      transform: rotate(90deg);
+    }
+
+    .proc-advanced summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 3px;
+    }
+
+    .proc-advanced-content {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding-top: 8px;
+    }
+
+    .proc-advanced-content .proc-section + .proc-section {
+      border-top: 1px solid rgba(255, 255, 255, .06);
+      padding-top: 12px;
+    }
+
+    .proc-advanced-note {
+      color: var(--text-faint);
+      font-size: 10px;
+      line-height: 1.4;
+    }
+
     .proc-label-row {
       display: flex;
       align-items: center;
@@ -1273,7 +1328,7 @@
   </div>
 
   <!-- processing toolbar alongside viewport -->
-  <aside id="processing-toolbar" class="proc-toolbar" aria-label="Texture and UV processing">
+  <aside id="processing-toolbar" class="proc-toolbar" aria-label="Texture and mesh processing">
     <div class="proc-header">
       <div class="proc-title">
         <svg viewBox="0 0 24 24" class="proc-icon">
@@ -1294,111 +1349,6 @@
 
     <div class="proc-tab-panels">
       <div class="proc-tab-panel" id="proc-panel-mesh" role="tabpanel" aria-labelledby="proc-tab-mesh">
-
-    <!-- Target Texture Encoding -->
-    <div class="proc-section">
-      <div class="proc-label-row">
-        <span class="proc-label-with-help">
-          <label for="proc-texture-format" class="proc-label">Texture Encoding</label>
-          <button class="proc-help" type="button" aria-label="About texture encoding" aria-expanded="false"
-            aria-describedby="proc-tooltip" data-help="Preserve the source texture bytes, or convert embedded WebP textures for broader compatibility with DCC tools and game engines.">i</button>
-        </span>
-        <span class="proc-tag">Target Format</span>
-      </div>
-      <div class="select-wrapper">
-        <select id="proc-texture-format" class="proc-select" aria-label="Target Texture Encoding">
-          <option value="original">None / Original (Untouched)</option>
-          <option value="png">PNG (Re-encode embedded)</option>
-          <option value="jpeg">JPEG (Re-encode embedded)</option>
-        </select>
-        <svg class="select-arrow" viewBox="0 0 24 24">
-          <path d="M7 10l5 5 5-5z" />
-        </svg>
-      </div>
-    </div>
-
-    <!-- UV Orientation (Flip Y) -->
-    <div class="proc-section">
-      <div class="proc-label-row">
-        <span class="proc-label-with-help">
-          <span class="proc-label">UV Orientation</span>
-          <button class="proc-help" type="button" aria-label="About UV orientation" aria-expanded="false"
-            aria-describedby="proc-tooltip" data-help="Invert the vertical texture coordinate when a model's texture appears upside down. The viewport updates immediately.">i</button>
-        </span>
-        <span class="status-badge badge-normal" id="uv-status-badge">NORMAL</span>
-      </div>
-      <div class="toggle-row">
-        <span class="toggle-text">Invert Vertical UV (Flip Y)</span>
-        <label class="switch" for="proc-uv-flip" aria-label="Invert Vertical UV (Flip Y)">
-          <input type="checkbox" id="proc-uv-flip">
-          <span class="slider"></span>
-        </label>
-      </div>
-    </div>
-
-    <!-- Decals & Alpha Cutout -->
-    <div class="proc-section">
-      <div class="proc-label-row">
-        <span class="proc-label-with-help">
-          <span class="proc-label">Decals &amp; Alpha Cutout</span>
-          <button class="proc-help" type="button" aria-label="About alpha cutout" aria-expanded="false"
-            aria-describedby="proc-tooltip" data-help="Remove transparent backgrounds from overlay decals such as eyes, mouths, and eyebrows. Adjust the threshold to control which pixels remain visible.">i</button>
-        </span>
-        <span class="status-badge badge-active" id="alpha-status-badge">CUTOUT (0.5)</span>
-      </div>
-      <div class="toggle-row" style="margin-bottom: 6px;">
-        <span class="toggle-text">Cutout Transparent Decals</span>
-        <label class="switch" for="proc-alpha-toggle" aria-label="Cutout Transparent Decals">
-          <input type="checkbox" id="proc-alpha-toggle" checked>
-          <span class="slider"></span>
-        </label>
-      </div>
-      <div class="proc-dependent" data-enabled-by="proc-alpha-toggle">
-        <div class="proc-label-row" style="margin-top: 4px;">
-          <label for="proc-alpha-slider" class="proc-tag">Cutout Threshold</label>
-          <span id="proc-alpha-badge" style="font-size: 10px; color: var(--text-faint);">0.50</span>
-        </div>
-        <div class="proc-slider-row">
-          <input type="range" id="proc-alpha-slider" min="0.01" max="0.99" step="0.05" value="0.5">
-        </div>
-      </div>
-    </div>
-
-    <!-- Floating textured sheets -> receiver texture bake -->
-    <div class="proc-section">
-      <div class="proc-label-row">
-        <span class="proc-label-with-help">
-          <span class="proc-label">Floating Decal Projection</span>
-          <button class="proc-help" type="button" aria-label="About floating decal projection" aria-expanded="false"
-            aria-describedby="proc-tooltip" data-help="Bake floating textured sheets into the surface beneath them. High-confidence sheets are selected automatically; review ambiguous matches before exporting.">i</button>
-        </span>
-        <span class="status-badge badge-normal" id="decal-bake-badge">OFF</span>
-      </div>
-      <div class="toggle-row" style="margin-bottom: 7px;">
-        <span class="toggle-text">Bake Sheets Into Surface</span>
-        <label class="switch" for="proc-decal-bake" aria-label="Bake floating textured sheets into their receiving surface">
-          <input type="checkbox" id="proc-decal-bake">
-          <span class="slider"></span>
-        </label>
-      </div>
-      <div class="proc-dependent" data-enabled-by="proc-decal-bake">
-        <div class="proc-label-row">
-          <label for="proc-decal-mode" class="proc-tag">Projection Direction</label>
-        </div>
-        <div class="select-wrapper" style="margin-top: 4px;">
-          <select id="proc-decal-mode" class="proc-select" aria-label="Floating decal projection direction">
-            <option value="auto">Surface Conforming (Local)</option>
-            <option value="sheet-normal">Along Sheet Normal</option>
-            <option value="receiver-normal">Along Surface Normal</option>
-            <option value="closest">Closest Surface</option>
-          </select>
-          <svg class="select-arrow" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z" /></svg>
-        </div>
-      </div>
-      <div id="decal-candidate-list" class="decal-candidate-list">
-        <div class="proc-texture-empty">Load a model to detect textured sheets</div>
-      </div>
-    </div>
 
     <!-- Mesh Repair & Sealing (Welding, Disjoint Mesh Healing, Hole Closing) -->
     <div class="proc-section">
@@ -1479,6 +1429,42 @@
       </div>
       </div>
 
+    <!-- Floating textured sheets -> receiver texture bake -->
+    <div class="proc-section">
+      <div class="proc-label-row">
+        <span class="proc-label-with-help">
+          <span class="proc-label">Floating Decal Projection</span>
+          <button class="proc-help" type="button" aria-label="About floating decal projection" aria-expanded="false"
+            aria-describedby="proc-tooltip" data-help="Bake floating textured sheets into the surface beneath them. High-confidence sheets are selected automatically; review ambiguous matches before exporting.">i</button>
+        </span>
+        <span class="status-badge badge-normal" id="decal-bake-badge">OFF</span>
+      </div>
+      <div class="toggle-row" style="margin-bottom: 7px;">
+        <span class="toggle-text">Bake Sheets Into Surface</span>
+        <label class="switch" for="proc-decal-bake" aria-label="Bake floating textured sheets into their receiving surface">
+          <input type="checkbox" id="proc-decal-bake">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="proc-dependent" data-enabled-by="proc-decal-bake">
+        <div class="proc-label-row">
+          <label for="proc-decal-mode" class="proc-tag">Projection Direction</label>
+        </div>
+        <div class="select-wrapper" style="margin-top: 4px;">
+          <select id="proc-decal-mode" class="proc-select" aria-label="Floating decal projection direction">
+            <option value="auto">Surface Conforming (Local)</option>
+            <option value="sheet-normal">Along Sheet Normal</option>
+            <option value="receiver-normal">Along Surface Normal</option>
+            <option value="closest">Closest Surface</option>
+          </select>
+          <svg class="select-arrow" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z" /></svg>
+        </div>
+      </div>
+      <div id="decal-candidate-list" class="decal-candidate-list">
+        <div class="proc-texture-empty">Load a model to detect textured sheets</div>
+      </div>
+    </div>
+
     <!-- Detected Textures Summary -->
     <div class="proc-section proc-textures-section" id="proc-textures-section">
       <div class="proc-label-row">
@@ -1489,6 +1475,47 @@
         <div class="proc-texture-empty">No embedded textures detected</div>
       </div>
     </div>
+
+    <details class="proc-advanced">
+      <summary><span class="proc-label">Advanced</span></summary>
+      <div class="proc-advanced-content">
+        <div class="proc-section">
+          <div class="proc-label-row">
+            <span class="proc-label-with-help">
+              <label for="proc-texture-format" class="proc-tag">Texture Encoding</label>
+              <button class="proc-help" type="button" aria-label="About texture encoding" aria-expanded="false"
+                aria-describedby="proc-tooltip" data-help="Preserve the source texture bytes, or convert embedded WebP textures for compatibility with tools such as DitherForge, DCC apps, and game engines.">i</button>
+            </span>
+            <span class="proc-tag">Export Compatibility</span>
+          </div>
+          <div class="select-wrapper">
+            <select id="proc-texture-format" class="proc-select" aria-label="Target Texture Encoding">
+              <option value="original">None / Original (Untouched)</option>
+              <option value="png">PNG (Re-encode embedded)</option>
+              <option value="jpeg">JPEG (Re-encode embedded)</option>
+            </select>
+            <svg class="select-arrow" viewBox="0 0 24 24">
+              <path d="M7 10l5 5 5-5z" />
+            </svg>
+          </div>
+        </div>
+
+        <div class="proc-section">
+          <div class="proc-label-row">
+            <span class="proc-label-with-help">
+              <label for="proc-alpha-slider" class="proc-tag">Decal Cutout Threshold</label>
+              <button class="proc-help" type="button" aria-label="About decal cutout threshold" aria-expanded="false"
+                aria-describedby="proc-tooltip" data-help="Transparent decal cutout is always enabled. Raise this threshold to remove more semi-transparent edge pixels; lower it to retain softer edges.">i</button>
+            </span>
+            <span id="proc-alpha-badge" style="font-size: 10px; color: var(--text-faint);">0.50</span>
+          </div>
+          <div class="proc-slider-row">
+            <input type="range" id="proc-alpha-slider" min="0.05" max="0.95" step="0.05" value="0.5">
+          </div>
+          <p class="proc-advanced-note">Transparent decal cutout is always applied.</p>
+        </div>
+      </div>
+    </details>
       </div>
 
       <div class="proc-tab-panel" id="proc-panel-color" role="tabpanel" aria-labelledby="proc-tab-color" hidden>
@@ -1675,7 +1702,6 @@
       cloneModelForProcessing,
       analyzeFloatingDecals,
       bakeFloatingDecals,
-      applyUvFlip,
       applyLiveColorQuantization,
       exportMultiColor3MF,
       exportProcessedGlb,
@@ -1712,11 +1738,7 @@
     const $procToolbar = $('processing-toolbar');
     const $procBtn = $('proc-btn');
     const $procFormat = $('proc-texture-format');
-    const $procUvFlip = $('proc-uv-flip');
-    const $uvBadge = $('uv-status-badge');
-    const $procAlphaToggle = $('proc-alpha-toggle');
     const $procAlphaSlider = $('proc-alpha-slider');
-    const $alphaBadge = $('alpha-status-badge');
     const $alphaSliderBadge = $('proc-alpha-badge');
     const $decalBakeToggle = $('proc-decal-bake');
     const $decalBakeBadge = $('decal-bake-badge');
@@ -1842,7 +1864,7 @@
     }
 
     function syncAllDependentControls() {
-      [$procAlphaToggle, $decalBakeToggle, $procRepairToggle, $quantizeToggle]
+      [$decalBakeToggle, $procRepairToggle, $quantizeToggle]
         .forEach(syncDependentControls);
     }
 
@@ -2235,8 +2257,6 @@
       if (!sourceModelDocument) return null;
       const revision = ++rebuildRevision;
       const nextModel = cloneModelForProcessing(sourceModelDocument);
-      const flipped = $procUvFlip.checked;
-      applyUvFlip(nextModel, flipped);
 
       let decalResult = null;
       if ($decalBakeToggle.checked) {
@@ -2245,8 +2265,8 @@
         $decalBakeBadge.className = 'status-badge badge-warn';
         if (mappings.length) {
           decalResult = await bakeFloatingDecals(nextModel, mappings, {
-            alphaThreshold: $procAlphaToggle.checked ? parseFloat($procAlphaSlider.value || '0.5') : 0,
-            alphaCutout: $procAlphaToggle.checked,
+            alphaThreshold: parseFloat($procAlphaSlider.value || '0.5'),
+            alphaCutout: true,
             projectionMode: $decalMode.value,
           });
         }
@@ -2279,7 +2299,7 @@
       );
       if (revision !== rebuildRevision) return null;
 
-      const { triangles } = viewer.replaceObject(nextModel, { frame: false, uvFlipped: flipped });
+      const { triangles } = viewer.replaceObject(nextModel, { frame: false, uvFlipped: false });
       updateInfoDisplay(triangles);
       updateTextureListUI();
       renderSwatches(activePalette);
@@ -2384,15 +2404,9 @@
         lastLoadedSizeMb = (loaded.sizeBytes / 1024 / 1024).toFixed(2);
         updateInfoDisplay(triangles);
 
-        $procUvFlip.checked = false;
-        $uvBadge.textContent = 'NORMAL';
-        $uvBadge.className = 'status-badge badge-normal';
-        $procAlphaToggle.checked = true;
         $procAlphaSlider.value = '0.5';
         viewer.setAlphaCutout(true);
         viewer.setAlphaTest(0.5);
-        $alphaBadge.textContent = 'CUTOUT (0.5)';
-        $alphaBadge.className = 'status-badge badge-active';
         $alphaSliderBadge.textContent = '0.50';
         $decalBakeToggle.checked = false;
         $decalMode.value = 'auto';
@@ -2691,37 +2705,11 @@
       updateQuantization(false);
     });
 
-    // UV Orientation toggle listener
-    $procUvFlip.addEventListener('change', e => {
-      const flipped = e.target.checked;
-      $uvBadge.textContent = flipped ? 'FLIPPED' : 'NORMAL';
-      $uvBadge.className = 'status-badge ' + (flipped ? 'badge-warn' : 'badge-normal');
-      rebuildProcessedModel({ reason: flipped ? 'Inverted vertical UV' : 'Restored standard UVs' });
-    });
-
-    // Decals & Alpha Cutout listeners
-    $procAlphaToggle.addEventListener('change', e => {
-      const enabled = e.target.checked;
-      syncDependentControls($procAlphaToggle);
-      viewer.setAlphaCutout(enabled);
-      const testVal = parseFloat($procAlphaSlider.value || '0.5');
-      $alphaBadge.textContent = enabled ? `CUTOUT (${testVal.toFixed(1)})` : 'OFF';
-      $alphaBadge.className = 'status-badge ' + (enabled ? 'badge-active' : 'badge-normal');
-      if ($decalBakeToggle.checked) {
-        rebuildProcessedModel({ reason: enabled ? 'Updated decal cutout' : 'Baking full decal textures' });
-      } else {
-        toast(enabled ? `Decal cutout enabled (${testVal.toFixed(2)})` : 'Decal cutout disabled', 'ok', 1500);
-      }
-    });
-
+    // Transparent decal cutout is always enabled; only its threshold is adjustable.
     $procAlphaSlider.addEventListener('input', e => {
       const val = parseFloat(e.target.value);
       $alphaSliderBadge.textContent = val.toFixed(2);
-      if ($procAlphaToggle.checked) {
-        viewer.setAlphaTest(val);
-        $alphaBadge.textContent = `CUTOUT (${val.toFixed(1)})`;
-        $alphaBadge.className = 'status-badge badge-active';
-      }
+      viewer.setAlphaTest(val);
       if ($decalBakeToggle.checked) rebuildProcessedModel();
     });
 
