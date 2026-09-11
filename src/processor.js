@@ -1906,6 +1906,24 @@ function smoothBoundaries(labels, width, height, passes, numColors) {
   return src;
 }
 
+export function processTextureLabels(
+  labels,
+  width,
+  height,
+  numColors,
+  despeckleSize = 0,
+  smoothLevel = 0
+) {
+  let processed = labels;
+  if (despeckleSize > 0) {
+    processed = despeckleLabels(processed, width, height, despeckleSize, numColors);
+  }
+  if (smoothLevel > 0) {
+    processed = smoothBoundaries(processed, width, height, smoothLevel, numColors);
+  }
+  return processed;
+}
+
 /**
  * Smartly resizes a palette without resetting user edits:
  * - Trimming keeps existing colors intact.
@@ -2053,13 +2071,9 @@ export function applyLiveColorQuantization(
       labels[p] = indexLut[lutIdx];
     }
 
-    if (despeckleSize > 0) {
-      labels = despeckleLabels(labels, W, H, despeckleSize, extractedPalette.length);
-    }
-
-    if (smoothLevel > 0) {
-      labels = smoothBoundaries(labels, W, H, smoothLevel, extractedPalette.length);
-    }
+    labels = processTextureLabels(
+      labels, W, H, extractedPalette.length, despeckleSize, smoothLevel
+    );
 
     for (let i = 0, p = 0; i < data.length; i += 4, p++) {
       const c = extractedPalette[labels[p]];
@@ -2076,7 +2090,12 @@ export function applyLiveColorQuantization(
     newTexture.wrapT = mat._originalMap.wrapT;
     newTexture.offset.copy(mat._originalMap.offset);
     newTexture.repeat.copy(mat._originalMap.repeat);
+    newTexture.center.copy(mat._originalMap.center);
     newTexture.rotation = mat._originalMap.rotation;
+    newTexture.matrixAutoUpdate = mat._originalMap.matrixAutoUpdate;
+    if (mat._originalMap.matrixAutoUpdate === false) {
+      newTexture.matrix.copy(mat._originalMap.matrix);
+    }
 
     mat.map = newTexture;
     mat._quantizedCanvas = canvas;
@@ -2098,7 +2117,13 @@ export function applyLiveColorQuantization(
 function getPrusaMmuHex(extruderId) {
   if (extruderId === 1) return '4';
   if (extruderId === 2) return '8';
-  return (extruderId - 3).toString(16).toUpperCase() + 'C';
+  // TriangleSelector reserves F as a continuation nibble for states above 17.
+  // The string is nibble-reversed on disk, so Extruder18 is 0FC (not FC),
+  // Extruder19 is 1FC, and so on through the app's 32-color limit.
+  const extendedState = extruderId - 3;
+  const continuationCount = Math.floor(extendedState / 15);
+  const remainder = extendedState % 15;
+  return remainder.toString(16).toUpperCase() + 'F'.repeat(continuationCount) + 'C';
 }
 
 const PAINT_TRACE_EPSILON = 1e-9;
@@ -2107,6 +2132,39 @@ const MAX_PAINT_BOUNDARY_SEGMENTS = 2000000;
 
 function positiveModulo(value, modulus) {
   return ((value % modulus) + modulus) % modulus;
+}
+
+function rasterWrapPeriod(size, wrapping) {
+  if (wrapping === THREE.RepeatWrapping) return size;
+  if (wrapping === THREE.MirroredRepeatWrapping) return size * 2;
+  return null;
+}
+
+function wrappedRasterCell(cell, size, wrapping) {
+  if (wrapping === THREE.RepeatWrapping) return positiveModulo(cell, size);
+  if (wrapping === THREE.MirroredRepeatWrapping) {
+    const mirrored = positiveModulo(cell, size * 2);
+    return mirrored < size ? mirrored : size * 2 - 1 - mirrored;
+  }
+  return Math.max(0, Math.min(size - 1, cell));
+}
+
+function wrappedTextureCoordinate(value, wrapping) {
+  if (wrapping === THREE.RepeatWrapping) return positiveModulo(value, 1);
+  if (wrapping === THREE.MirroredRepeatWrapping) {
+    const mirrored = positiveModulo(value, 2);
+    return mirrored <= 1 ? mirrored : 2 - mirrored;
+  }
+  return Math.max(0, Math.min(1, value));
+}
+
+function transformPaintUv(raster, u, v) {
+  const elements = raster.uvMatrix;
+  if (!elements) return [u * raster.repeatX + raster.offsetX, v * raster.repeatY + raster.offsetY];
+  return [
+    elements[0] * u + elements[3] * v + elements[6],
+    elements[1] * u + elements[4] * v + elements[7],
+  ];
 }
 
 function localPaintPointToPosition(tri, point) {
@@ -2181,8 +2239,8 @@ function textureTriangleSliceRange(points, axis, value) {
 }
 
 function rasterCellState(raster, cellX, cellY) {
-  const px = positiveModulo(cellX, raster.width);
-  const textureRow = positiveModulo(cellY, raster.height);
+  const px = wrappedRasterCell(cellX, raster.width, raster.wrapS);
+  const textureRow = wrappedRasterCell(cellY, raster.height, raster.wrapT);
   const py = raster.flipY ? raster.height - 1 - textureRow : textureRow;
   const pixelIndex = py * raster.width + px;
   const alpha = raster.rgba ? raster.rgba[pixelIndex * 4 + 3] : 255;
@@ -2191,50 +2249,220 @@ function rasterCellState(raster, cellX, cellY) {
 
 function getRasterBoundaryIndex(raster, traceStats) {
   if (raster.boundaryIndex) return raster.boundaryIndex;
-  const vertical = Array.from({ length: raster.width }, () => []);
-  const horizontal = Array.from({ length: raster.height }, () => []);
-  const comparisons = raster.width * raster.height * 2;
+  const xPeriod = rasterWrapPeriod(raster.width, raster.wrapS);
+  const yPeriod = rasterWrapPeriod(raster.height, raster.wrapT);
+  const xBoundaryCount = xPeriod || raster.width + 1;
+  const yBoundaryCount = yPeriod || raster.height + 1;
+  const xCellCount = xPeriod || raster.width;
+  const yCellCount = yPeriod || raster.height;
+  const vertical = Array.from({ length: xBoundaryCount }, () => []);
+  const horizontal = Array.from({ length: yBoundaryCount }, () => []);
+  const comparisons = xBoundaryCount * yCellCount + yBoundaryCount * xCellCount;
   traceStats.scanSteps += comparisons;
   if (traceStats.scanSteps > MAX_PAINT_BOUNDARY_SCAN_STEPS) {
     throw new Error('Working textures contain too many texels to trace safely. Reduce the working texture resolution.');
   }
 
-  for (let gridX = 0; gridX < raster.width; gridX++) {
+  for (let gridX = 0; gridX < xBoundaryCount; gridX++) {
     const column = vertical[gridX];
-    for (let cellY = 0; cellY < raster.height; cellY++) {
+    for (let cellY = 0; cellY < yCellCount; cellY++) {
       if (rasterCellState(raster, gridX - 1, cellY) !== rasterCellState(raster, gridX, cellY)) {
         column.push(cellY);
       }
     }
   }
-  for (let gridY = 0; gridY < raster.height; gridY++) {
+  for (let gridY = 0; gridY < yBoundaryCount; gridY++) {
     const row = horizontal[gridY];
-    for (let cellX = 0; cellX < raster.width; cellX++) {
+    for (let cellX = 0; cellX < xCellCount; cellX++) {
       if (rasterCellState(raster, cellX, gridY - 1) !== rasterCellState(raster, cellX, gridY)) {
         row.push(cellX);
       }
     }
   }
-  raster.boundaryIndex = { vertical, horizontal };
+  raster.boundaryIndex = { vertical, horizontal, xPeriod, yPeriod };
   return raster.boundaryIndex;
+}
+
+function rasterBoundaryIndex(grid, size, period) {
+  if (period) return positiveModulo(grid, period);
+  return grid >= 0 && grid <= size ? grid : -1;
+}
+
+function rasterCellIntervals(baseCells, firstCell, lastCell, size, period) {
+  if (firstCell > lastCell || baseCells.length === 0) return [];
+  if (period) {
+    const intervals = [];
+    for (const baseCell of baseCells) {
+      const firstTile = Math.ceil((firstCell - baseCell) / period);
+      const lastTile = Math.floor((lastCell - baseCell) / period);
+      for (let tile = firstTile; tile <= lastTile; tile++) {
+        const cell = baseCell + tile * period;
+        intervals.push([cell, cell + 1]);
+      }
+    }
+    return intervals;
+  }
+
+  const intervals = [];
+  // Clamp-to-edge extends the first and last texel indefinitely. Preserve
+  // boundaries in out-of-range UVs without iterating one segment per tile.
+  if (firstCell < 0 && baseCells.includes(0)) {
+    intervals.push([firstCell, Math.min(lastCell + 1, 0)]);
+  }
+  for (const cell of baseCells) {
+    if (cell >= firstCell && cell <= lastCell) intervals.push([cell, cell + 1]);
+  }
+  if (lastCell >= size && baseCells.includes(size - 1)) {
+    intervals.push([Math.max(firstCell, size), lastCell + 1]);
+  }
+  return intervals;
+}
+
+function rasterStateAtTexturePoint(raster, point) {
+  return rasterCellState(
+    raster,
+    Math.floor(point[0] * raster.width),
+    Math.floor(point[1] * raster.height)
+  );
+}
+
+function traceDegenerateTextureBoundarySegments(texturePoints, raster, traceStats) {
+  let endpointA = 0;
+  let endpointB = 1;
+  let maxDistanceSquared = -1;
+  for (let a = 0; a < 3; a++) {
+    for (let b = a + 1; b < 3; b++) {
+      const dx = texturePoints[b][0] - texturePoints[a][0];
+      const dy = texturePoints[b][1] - texturePoints[a][1];
+      const distanceSquared = dx * dx + dy * dy;
+      if (distanceSquared > maxDistanceSquared) {
+        maxDistanceSquared = distanceSquared;
+        endpointA = a;
+        endpointB = b;
+      }
+    }
+  }
+  if (maxDistanceSquared <= PAINT_TRACE_EPSILON ** 2) return [];
+
+  const origin = texturePoints[endpointA];
+  const direction = [
+    texturePoints[endpointB][0] - origin[0],
+    texturePoints[endpointB][1] - origin[1],
+  ];
+  const parameters = texturePoints.map(point => (
+    ((point[0] - origin[0]) * direction[0] + (point[1] - origin[1]) * direction[1]) /
+    maxDistanceSquared
+  ));
+  const minParameter = Math.min(...parameters);
+  const maxParameter = Math.max(...parameters);
+  const candidates = [];
+  const addAxisCandidates = (axis, size) => {
+    const delta = direction[axis];
+    if (Math.abs(delta) <= PAINT_TRACE_EPSILON) return;
+    const values = texturePoints.map(point => point[axis] * size);
+    const firstGrid = Math.ceil(Math.min(...values) - PAINT_TRACE_EPSILON);
+    const lastGrid = Math.floor(Math.max(...values) + PAINT_TRACE_EPSILON);
+    for (let grid = firstGrid; grid <= lastGrid; grid++) {
+      const parameter = (grid / size - origin[axis]) / delta;
+      if (parameter > minParameter + PAINT_TRACE_EPSILON &&
+        parameter < maxParameter - PAINT_TRACE_EPSILON) {
+        candidates.push(parameter);
+      }
+    }
+  };
+  addAxisCandidates(0, raster.width);
+  addAxisCandidates(1, raster.height);
+  candidates.sort((a, b) => a - b);
+  const uniqueCandidates = candidates.filter(
+    (value, index) => index === 0 || Math.abs(value - candidates[index - 1]) > 1e-10
+  );
+  traceStats.scanSteps += uniqueCandidates.length;
+  if (traceStats.scanSteps > MAX_PAINT_BOUNDARY_SCAN_STEPS) {
+    throw new Error('Working textures contain too many texels to trace safely. Reduce the working texture resolution.');
+  }
+
+  const referenceVertices = [[0, 0], [1, 0], [0, 1]];
+  const pointAtParameter = parameter => [
+    origin[0] + direction[0] * parameter,
+    origin[1] + direction[1] * parameter,
+  ];
+  const localSegmentAtParameter = parameter => {
+    const intersections = [];
+    const addIntersection = point => {
+      if (!intersections.some(existing =>
+        Math.hypot(existing[0] - point[0], existing[1] - point[1]) <= 1e-10
+      )) intersections.push(point);
+    };
+    for (let edge = 0; edge < 3; edge++) {
+      const next = (edge + 1) % 3;
+      const valueA = parameters[edge];
+      const valueB = parameters[next];
+      const localA = referenceVertices[edge];
+      const localB = referenceVertices[next];
+      if (Math.abs(valueA - parameter) <= 1e-10) addIntersection(localA);
+      if ((valueA < parameter && valueB > parameter) ||
+        (valueA > parameter && valueB < parameter)) {
+        const t = (parameter - valueA) / (valueB - valueA);
+        addIntersection([
+          localA[0] + (localB[0] - localA[0]) * t,
+          localA[1] + (localB[1] - localA[1]) * t,
+        ]);
+      }
+    }
+    if (intersections.length < 2) return null;
+    let best = [intersections[0], intersections[1]];
+    let bestDistanceSquared = -1;
+    for (let a = 0; a < intersections.length; a++) {
+      for (let b = a + 1; b < intersections.length; b++) {
+        const dx = intersections[b][0] - intersections[a][0];
+        const dy = intersections[b][1] - intersections[a][1];
+        const distanceSquared = dx * dx + dy * dy;
+        if (distanceSquared > bestDistanceSquared) {
+          bestDistanceSquared = distanceSquared;
+          best = [intersections[a], intersections[b]];
+        }
+      }
+    }
+    return bestDistanceSquared > PAINT_TRACE_EPSILON ** 2 ? best : null;
+  };
+
+  const segments = [];
+  for (let index = 0; index < uniqueCandidates.length; index++) {
+    const parameter = uniqueCandidates[index];
+    const previous = index > 0 ? uniqueCandidates[index - 1] : minParameter;
+    const next = index + 1 < uniqueCandidates.length ? uniqueCandidates[index + 1] : maxParameter;
+    const beforeState = rasterStateAtTexturePoint(raster, pointAtParameter((previous + parameter) * 0.5));
+    const afterState = rasterStateAtTexturePoint(raster, pointAtParameter((parameter + next) * 0.5));
+    if (beforeState === afterState) continue;
+    const segment = localSegmentAtParameter(parameter);
+    if (!segment) continue;
+    segments.push(segment);
+    traceStats.boundarySegments++;
+    if (traceStats.boundarySegments > MAX_PAINT_BOUNDARY_SEGMENTS) {
+      throw new Error('Texture boundary is too complex to trace safely. Despeckle the texture or use a lower working texture resolution.');
+    }
+  }
+  return segments;
 }
 
 function traceTextureBoundarySegments(tri, traceStats) {
   const raster = tri.raster;
-  if (!raster || Math.abs(raster.repeatX) <= PAINT_TRACE_EPSILON ||
-    Math.abs(raster.repeatY) <= PAINT_TRACE_EPSILON) return [];
+  if (!raster) return [];
 
   const texturePoints = [
-    [tri.u0 * raster.repeatX + raster.offsetX, tri.v0 * raster.repeatY + raster.offsetY],
-    [tri.u1 * raster.repeatX + raster.offsetX, tri.v1 * raster.repeatY + raster.offsetY],
-    [tri.u2 * raster.repeatX + raster.offsetX, tri.v2 * raster.repeatY + raster.offsetY],
+    transformPaintUv(raster, tri.u0, tri.v0),
+    transformPaintUv(raster, tri.u1, tri.v1),
+    transformPaintUv(raster, tri.u2, tri.v2),
   ];
   const e1x = texturePoints[1][0] - texturePoints[0][0];
   const e1y = texturePoints[1][1] - texturePoints[0][1];
   const e2x = texturePoints[2][0] - texturePoints[0][0];
   const e2y = texturePoints[2][1] - texturePoints[0][1];
   const determinant = e1x * e2y - e1y * e2x;
-  if (Math.abs(determinant) <= PAINT_TRACE_EPSILON) return [];
+  if (Math.abs(determinant) <= PAINT_TRACE_EPSILON) {
+    traceStats.degenerateUvTriangles++;
+    return traceDegenerateTextureBoundarySegments(texturePoints, raster, traceStats);
+  }
 
   const toLocal = point => {
     const dx = point[0] - texturePoints[0][0];
@@ -2271,14 +2499,16 @@ function traceTextureBoundarySegments(tri, traceStats) {
     if (!range) continue;
     const firstCellY = Math.floor(range[0] * raster.height);
     const lastCellY = Math.ceil(range[1] * raster.height) - 1;
-    const baseCells = boundaryIndex.vertical[positiveModulo(gridX, raster.width)];
-    for (const baseCellY of baseCells) {
-      const firstTile = Math.ceil((firstCellY - baseCellY) / raster.height);
-      const lastTile = Math.floor((lastCellY - baseCellY) / raster.height);
-      for (let tile = firstTile; tile <= lastTile; tile++) {
-        const cellY = baseCellY + tile * raster.height;
-        appendSegment([u, cellY / raster.height], [u, (cellY + 1) / raster.height]);
-      }
+    const boundaryIndexX = rasterBoundaryIndex(
+      gridX, raster.width, boundaryIndex.xPeriod
+    );
+    if (boundaryIndexX < 0) continue;
+    const baseCells = boundaryIndex.vertical[boundaryIndexX];
+    const intervals = rasterCellIntervals(
+      baseCells, firstCellY, lastCellY, raster.height, boundaryIndex.yPeriod
+    );
+    for (const [startCellY, endCellY] of intervals) {
+      appendSegment([u, startCellY / raster.height], [u, endCellY / raster.height]);
     }
   }
 
@@ -2288,14 +2518,16 @@ function traceTextureBoundarySegments(tri, traceStats) {
     if (!range) continue;
     const firstCellX = Math.floor(range[0] * raster.width);
     const lastCellX = Math.ceil(range[1] * raster.width) - 1;
-    const baseCells = boundaryIndex.horizontal[positiveModulo(gridY, raster.height)];
-    for (const baseCellX of baseCells) {
-      const firstTile = Math.ceil((firstCellX - baseCellX) / raster.width);
-      const lastTile = Math.floor((lastCellX - baseCellX) / raster.width);
-      for (let tile = firstTile; tile <= lastTile; tile++) {
-        const cellX = baseCellX + tile * raster.width;
-        appendSegment([cellX / raster.width, v], [(cellX + 1) / raster.width, v]);
-      }
+    const boundaryIndexY = rasterBoundaryIndex(
+      gridY, raster.height, boundaryIndex.yPeriod
+    );
+    if (boundaryIndexY < 0) continue;
+    const baseCells = boundaryIndex.horizontal[boundaryIndexY];
+    const intervals = rasterCellIntervals(
+      baseCells, firstCellX, lastCellX, raster.width, boundaryIndex.xPeriod
+    );
+    for (const [startCellX, endCellX] of intervals) {
+      appendSegment([startCellX / raster.width, v], [endCellX / raster.width, v]);
     }
   }
 
@@ -2738,6 +2970,85 @@ function triangulatePaintGraph(textureSegments, boundaryPoints) {
   return conformPaintTriangleJunctions(result);
 }
 
+function paintBoundaryPointsForValidation(segments) {
+  const parameters = [new Set([0, 1]), new Set([0, 1]), new Set([0, 1])];
+  const register = point => {
+    const x = point[0];
+    const y = point[1];
+    const epsilon = 1e-7;
+    if (Math.abs(y) <= epsilon) parameters[0].add(Math.max(0, Math.min(1, x)));
+    if (Math.abs(1 - x - y) <= epsilon) parameters[1].add(Math.max(0, Math.min(1, y)));
+    if (Math.abs(x) <= epsilon) parameters[2].add(Math.max(0, Math.min(1, 1 - y)));
+  };
+  for (const segment of segments) {
+    register(segment[0]);
+    register(segment[1]);
+  }
+  const sorted = parameters.map(values => [...values].sort((a, b) => a - b));
+  return [
+    sorted[0].map(t => [t, 0]),
+    sorted[1].map(t => [1 - t, t]),
+    sorted[2].map(t => [0, 1 - t]),
+  ];
+}
+
+function paintTriangulationSignature(tri, triangles) {
+  const areaByState = new Map();
+  const regionsByState = new Map();
+  let coveredArea = 0;
+  for (const triangle of triangles) {
+    const area = Math.abs(polygonArea2D(triangle.points));
+    coveredArea += area;
+    const uv = localPaintPointToUv(tri, triangle.samplePoint);
+    const paint = tri.sampler(uv[0], uv[1]);
+    const state = paint.alpha < 128 ? -1 : paint.color;
+    areaByState.set(state, (areaByState.get(state) || 0) + area);
+    if (!regionsByState.has(state)) regionsByState.set(state, new Set());
+    regionsByState.get(state).add(
+      `${Math.round(triangle.samplePoint[0] * 1e9)}_${Math.round(triangle.samplePoint[1] * 1e9)}`
+    );
+  }
+  return { areaByState, regionsByState, coveredArea };
+}
+
+function simplificationPreservesPaint(tri, exactSegments, simplifiedSegments) {
+  if (simplifiedSegments.length === exactSegments.length) {
+    const keyFor = segment => segment
+      .map(point => `${Math.round(point[0] * 1e9)}_${Math.round(point[1] * 1e9)}`)
+      .sort()
+      .join('|');
+    const exactKeys = exactSegments.map(keyFor).sort();
+    const simplifiedKeys = simplifiedSegments.map(keyFor).sort();
+    if (exactKeys.every((key, index) => key === simplifiedKeys[index])) return true;
+  }
+  const exactTriangles = triangulatePaintGraph(
+    exactSegments, paintBoundaryPointsForValidation(exactSegments)
+  );
+  const simplifiedTriangles = triangulatePaintGraph(
+    simplifiedSegments, paintBoundaryPointsForValidation(simplifiedSegments)
+  );
+  const exact = paintTriangulationSignature(tri, exactTriangles);
+  const simplified = paintTriangulationSignature(tri, simplifiedTriangles);
+  if (Math.abs(exact.coveredArea - 0.5) > 1e-7 ||
+    Math.abs(simplified.coveredArea - 0.5) > 1e-7) return false;
+
+  const states = new Set([...exact.areaByState.keys(), ...simplified.areaByState.keys()]);
+  let totalAreaDifference = 0;
+  for (const state of states) {
+    const exactRegionCount = exact.regionsByState.get(state)?.size || 0;
+    const simplifiedRegionCount = simplified.regionsByState.get(state)?.size || 0;
+    if (exactRegionCount !== simplifiedRegionCount) return false;
+    totalAreaDifference += Math.abs(
+      (exact.areaByState.get(state) || 0) - (simplified.areaByState.get(state) || 0)
+    );
+  }
+
+  // The tolerance may move a boundary slightly, but it must not materially
+  // change a face's paint coverage. The normalized symmetric difference is
+  // capped at 0.5% of the source triangle; unsafe faces use exact contours.
+  return totalAreaDifference <= 0.0025 + 1e-9;
+}
+
 /**
  * Exports a SINGLE WATERTIGHT SOLID 3MF file with native Prusa/Bambu multi-material paint data.
  * Merges all meshes and maps each triangle to its respective material texture/color.
@@ -2751,7 +3062,7 @@ export async function exportMultiColor3MF(
   customPalette = null,
   despeckleSize = 0,
   smoothLevel = 0,
-  paintResolutionMm = 0.10
+  paintResolutionMm = 0
 ) {
   rootObject.updateWorldMatrix(true, true);
 
@@ -2844,6 +3155,7 @@ export async function exportMultiColor3MF(
     const img = m._originalMap?.image || m.map?.image;
     if (img) {
       let canvas = m._quantizedCanvas;
+      let generatedLabels = null;
       if (!canvas || !isQuantizeEnabled) {
         const plannedSize = samplerResolutionByMaterial.get(m);
         canvas = document.createElement('canvas');
@@ -2861,8 +3173,8 @@ export async function exportMultiColor3MF(
           const idx = ((d[i] >> 3) << 10) | ((d[i + 1] >> 3) << 5) | (d[i + 2] >> 3);
           labels[p] = indexLut[idx];
         }
-        if (despeckleSize > 0) labels = despeckleLabels(labels, W, H, despeckleSize, palette.length);
-        if (smoothLevel > 0) labels = smoothBoundaries(labels, W, H, smoothLevel, palette.length);
+        labels = processTextureLabels(labels, W, H, palette.length, despeckleSize, smoothLevel);
+        generatedLabels = labels;
 
         for (let i = 0, p = 0; i < d.length; i += 4, p++) {
           const c = palette[labels[p]];
@@ -2876,8 +3188,12 @@ export async function exportMultiColor3MF(
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const imgData = imageData.data;
       const map = m.map || m._originalMap;
+      if (map?.matrixAutoUpdate !== false) map?.updateMatrix?.();
       const offset = map?.offset || new THREE.Vector2(0, 0);
       const repeat = map?.repeat || new THREE.Vector2(1, 1);
+      const uvMatrix = map?.matrix?.elements ? Array.from(map.matrix.elements) : null;
+      const wrapS = map?.wrapS ?? THREE.ClampToEdgeWrapping;
+      const wrapT = map?.wrapT ?? THREE.ClampToEdgeWrapping;
       const W = canvas.width;
       const H = canvas.height;
 
@@ -2889,21 +3205,27 @@ export async function exportMultiColor3MF(
         m._quantizedLabelsWidth === W && m._quantizedLabelsHeight === H &&
         m._quantizedLabels?.length === W * H) {
         labels = m._quantizedLabels;
+      } else if (generatedLabels) {
+        labels = generatedLabels;
       } else {
         labels = new Uint8Array(W * H);
         for (let i = 0, p = 0; i < imgData.length; i += 4, p++) {
           const lutIdx = ((imgData[i] >> 3) << 10) | ((imgData[i + 1] >> 3) << 5) | (imgData[i + 2] >> 3);
           labels[p] = indexLut[lutIdx];
         }
-        if (despeckleSize > 0) labels = despeckleLabels(labels, W, H, despeckleSize, palette.length);
-        if (smoothLevel > 0) labels = smoothBoundaries(labels, W, H, smoothLevel, palette.length);
+        labels = processTextureLabels(labels, W, H, palette.length, despeckleSize, smoothLevel);
       }
 
       const sampler = (rawU, rawV) => {
-        let u = rawU * repeat.x + offset.x;
-        let v = rawV * repeat.y + offset.y;
-        const su = ((u % 1) + 1) % 1;
-        const sv = ((v % 1) + 1) % 1;
+        const transformed = transformPaintUv({
+          uvMatrix,
+          repeatX: repeat.x,
+          repeatY: repeat.y,
+          offsetX: offset.x,
+          offsetY: offset.y,
+        }, rawU, rawV);
+        const su = wrappedTextureCoordinate(transformed[0], wrapS);
+        const sv = wrappedTextureCoordinate(transformed[1], wrapT);
         const px = Math.min(W - 1, Math.max(0, Math.floor(su * W)));
         // Match Three.js WebGL texture coordinate orientation:
         // In Three.js, textures default to flipY = true (v = 1.0 is canvas top row 0, v = 0.0 is bottom row H - 1).
@@ -2923,6 +3245,9 @@ export async function exportMultiColor3MF(
         repeatY: repeat.y,
         offsetX: offset.x,
         offsetY: offset.y,
+        uvMatrix,
+        wrapS,
+        wrapT,
         flipY: map?.flipY ?? true,
       };
       materialSamplers.set(m, sampler);
@@ -3024,8 +3349,13 @@ export async function exportMultiColor3MF(
   const numericTolerance = Number(paintResolutionMm);
   const boundaryToleranceMm = Number.isFinite(numericTolerance)
     ? Math.max(0, Math.min(2, numericTolerance))
-    : 0.10;
-  const traceStats = { scanSteps: 0, boundarySegments: 0 };
+    : 0;
+  const traceStats = {
+    scanSteps: 0,
+    boundarySegments: 0,
+    degenerateUvTriangles: 0,
+    exactFallbackFaces: 0,
+  };
   const sharedEdgeSplits = new Map();
 
   function registerSharedEdgeSplit(pA, pB, t) {
@@ -3052,7 +3382,14 @@ export async function exportMultiColor3MF(
   for (const tri of initialTriangles) {
     const exactSegments = traceTextureBoundarySegments(tri, traceStats);
     tri.exactPaintBoundarySegments = exactSegments;
-    tri.paintBoundarySegments = simplifyPaintBoundaryNetwork(exactSegments, tri, boundaryToleranceMm);
+    const simplifiedSegments = simplifyPaintBoundaryNetwork(exactSegments, tri, boundaryToleranceMm);
+    if (boundaryToleranceMm > 0 &&
+      !simplificationPreservesPaint(tri, exactSegments, simplifiedSegments)) {
+      tri.paintBoundarySegments = simplifyPaintBoundaryNetwork(exactSegments, tri, 0);
+      traceStats.exactFallbackFaces++;
+    } else {
+      tri.paintBoundarySegments = simplifiedSegments;
+    }
     for (const segment of tri.paintBoundarySegments) {
       registerBoundaryPoint(tri, segment[0]);
       registerBoundaryPoint(tri, segment[1]);
@@ -3168,7 +3505,10 @@ export async function exportMultiColor3MF(
     const colorIdx = Math.max(0, Math.min(palette.length - 1, chosenColor));
     const colorIdx1Based = colorIdx + 1;
     const mmuHex = getPrusaMmuHex(colorIdx1Based);
-    allTrianglesXml += `<triangle v1="${v0}" v2="${v1}" v3="${v2}" slic3rpe:mmu_segmentation="${mmuHex}" paint_color="${colorIdx1Based}" pid="1" p1="${colorIdx}" />\n`;
+    // PrusaSlicer and Bambu/Orca use the same TriangleSelector hexadecimal
+    // bitstream; only the attribute name differs. A plain palette index in
+    // paint_color is decoded as a partial-triangle subdivision instruction.
+    allTrianglesXml += `<triangle v1="${v0}" v2="${v1}" v3="${v2}" slic3rpe:mmu_segmentation="${mmuHex}" paint_color="${mmuHex}" pid="1" p1="${colorIdx}" />\n`;
     emittedTriangleCount++;
   }
 
@@ -3196,6 +3536,8 @@ export async function exportMultiColor3MF(
     refinementPasses: 0,
     refinementLimited: false,
     tracedBoundarySegments: traceStats.boundarySegments,
+    degenerateUvTriangles: traceStats.degenerateUvTriangles,
+    exactFallbackFaces: traceStats.exactFallbackFaces,
     triangleCount: emittedTriangleCount,
   };
 

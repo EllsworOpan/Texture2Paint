@@ -81,8 +81,12 @@ function inspectPaintMesh(modelXml) {
   const vertices = [...modelXml.matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"/g)]
     .map(match => match.slice(1).map(Number));
   const triangles = [...modelXml.matchAll(
-    /<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"[^>]*paint_color="(\d+)"/g
-  )].map(match => match.slice(1).map(Number));
+    /<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"[^>]*p1="(\d+)"/g
+  )].map(match => {
+    const values = match.slice(1).map(Number);
+    values[3] += 1;
+    return values;
+  });
   const areaByColor = new Map();
   const edgeUses = new Map();
   for (const [aIndex, bIndex, cIndex, color] of triangles) {
@@ -153,10 +157,17 @@ test('3MF paint export traces an enclosed texture feature without probe sampling
   ]);
   const root = createQuantizedSquareRoot(labels, width, height);
   const modelXml = await exportedModelXml(root, 0);
-  const triangles = [...modelXml.matchAll(/<triangle\b[^>]*paint_color="(\d+)"/g)];
+  const triangles = [...modelXml.matchAll(/<triangle\b[^>]*p1="(\d+)"/g)];
   assert.ok(triangles.length > 2, 'the two source faces should be subdivided around the feature');
-  assert.ok(triangles.some(match => match[1] === '1'));
-  assert.ok(triangles.some(match => match[1] === '2'), 'the enclosed second color must survive tracing');
+  assert.ok(triangles.some(match => match[1] === '0'));
+  assert.ok(triangles.some(match => match[1] === '1'), 'the enclosed second color must survive tracing');
+
+  for (const match of modelXml.matchAll(
+    /slic3rpe:mmu_segmentation="([^"]+)" paint_color="([^"]+)"/g
+  )) {
+    assert.equal(match[2], match[1], 'Bambu/Orca and Prusa paint encodings must match');
+    assert.ok(match[1] === '4' || match[1] === '8');
+  }
 
   const { vertices, areaByColor, edgeUses } = inspectPaintMesh(modelXml);
   assert.ok(Math.abs((areaByColor.get(1) || 0) - 75) < 1e-6);
@@ -186,9 +197,31 @@ test('3MF boundary accuracy simplifies stair-stepped contours', async () => {
   const simplifiedXml = await exportedModelXml(root, 1);
   const simplifiedCount = [...simplifiedXml.matchAll(/<triangle\b/g)].length;
   assert.ok(simplifiedCount < exactCount, `${simplifiedCount} should be less than ${exactCount}`);
-  assert.match(simplifiedXml, /paint_color="1"/);
-  assert.match(simplifiedXml, /paint_color="2"/);
+  assert.match(simplifiedXml, /paint_color="4"/);
+  assert.match(simplifiedXml, /paint_color="8"/);
   assert.equal(root._lastPaintBake.boundaryToleranceMm, 1);
+});
+
+test('3MF boundary simplification falls back when it changes face paint coverage', async () => {
+  const width = 64;
+  const height = 64;
+  const labels = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const mortar = y % 8 === 0 || (x + (Math.floor(y / 8) % 2) * 4) % 16 === 0;
+      const chipped = ((x * 17 + y * 31) % 29) < 2;
+      labels[y * width + x] = mortar !== chipped ? 1 : 0;
+    }
+  }
+  const root = createQuantizedSquareRoot(labels, width, height);
+  const exactXml = await exportedModelXml(root, 0);
+  const exactAreas = inspectPaintMesh(exactXml).areaByColor;
+  const simplifiedXml = await exportedModelXml(root, 0.1);
+  const simplifiedAreas = inspectPaintMesh(simplifiedXml).areaByColor;
+
+  assert.ok(root._lastPaintBake.exactFallbackFaces > 0);
+  assert.ok(Math.abs((exactAreas.get(1) || 0) - (simplifiedAreas.get(1) || 0)) < 0.5);
+  assert.ok(Math.abs((exactAreas.get(2) || 0) - (simplifiedAreas.get(2) || 0)) < 0.5);
 });
 
 test('3MF exact tracing handles checkerboard contour junctions without overlaps', async () => {
@@ -203,6 +236,108 @@ test('3MF exact tracing handles checkerboard contour junctions without overlaps'
   const { areaByColor } = inspectPaintMesh(modelXml);
   assert.ok(Math.abs((areaByColor.get(1) || 0) - 50) < 1e-6);
   assert.ok(Math.abs((areaByColor.get(2) || 0) - 50) < 1e-6);
+});
+
+test('3MF tracing preserves cleaned regions that touch clamp-to-edge texture boundaries', async () => {
+  // This pattern mirrors the kind of thin, edge-connected regions produced
+  // by despeckling and smoothing. Treating the clamped UV edge as a repeating
+  // seam used to recolor the three light texels in the final row.
+  const labels = new Uint8Array([
+    1, 0, 0, 1, 0, 0,
+    1, 1, 0, 0, 0, 0,
+    0, 0, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 0,
+    0, 0, 0, 1, 1, 0,
+    1, 1, 1, 0, 0, 0,
+  ]);
+  const root = createQuantizedSquareRoot(labels, 6, 6);
+  const modelXml = await exportedModelXml(root, 0);
+  const { areaByColor } = inspectPaintMesh(modelXml);
+  assert.ok(Math.abs((areaByColor.get(1) || 0) - 575 / 9) < 1e-5);
+  assert.ok(Math.abs((areaByColor.get(2) || 0) - 325 / 9) < 1e-5);
+  assertNoUnmatchedSquareInteriorEdges(modelXml);
+});
+
+test('3MF tracing matches clamp and repeat texture wrap modes outside the unit UV range', async () => {
+  const labels = new Uint8Array([1, 0]);
+  const makeRoot = wrapS => {
+    const root = createQuantizedSquareRoot(labels.slice(), 2, 1);
+    root.children[0].geometry.setAttribute('uv', new THREE.Float32BufferAttribute([
+      0, 0,
+      2, 0,
+      2, 1,
+      0, 1,
+    ], 2));
+    root.children[0].material.map.wrapS = wrapS;
+    return root;
+  };
+
+  const clampedXml = await exportedModelXml(makeRoot(THREE.ClampToEdgeWrapping), 0);
+  const repeatedXml = await exportedModelXml(makeRoot(THREE.RepeatWrapping), 0);
+  const clampedAreas = inspectPaintMesh(clampedXml).areaByColor;
+  const repeatedAreas = inspectPaintMesh(repeatedXml).areaByColor;
+  assert.ok(Math.abs((clampedAreas.get(2) || 0) - 25) < 1e-6);
+  assert.ok(Math.abs((clampedAreas.get(1) || 0) - 75) < 1e-6);
+  assert.ok(Math.abs((repeatedAreas.get(2) || 0) - 50) < 1e-6);
+  assert.ok(Math.abs((repeatedAreas.get(1) || 0) - 50) < 1e-6);
+});
+
+test('3MF tracing subdivides geometric faces with line-degenerate UVs', async () => {
+  const material = createQuantizedMaterial(new Uint8Array([0, 1]), 2, 1);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0,
+  ], 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute([
+    0, 0,
+    1, 0,
+    0, 0,
+  ], 2));
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(geometry, material));
+  root._quantizedPalette = material._quantizedPalette;
+
+  const modelXml = await exportedModelXml(root, 0);
+  const { areaByColor } = inspectPaintMesh(modelXml);
+  assert.ok(Math.abs((areaByColor.get(1) || 0) - 37.5) < 1e-6);
+  assert.ok(Math.abs((areaByColor.get(2) || 0) - 12.5) < 1e-6);
+  assert.equal(root._lastPaintBake.degenerateUvTriangles, 1);
+});
+
+test('3MF writes the slicer TriangleSelector encoding to both paint attributes', async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([
+    0, 1,
+    2, 2,
+  ]), 2, 2);
+  const palette = [[0, 0, 0], [127, 127, 127], [255, 255, 255]];
+  root._quantizedPalette = palette;
+  root.children[0].material._quantizedPalette = palette;
+  const modelXml = await exportedModelXml(root, 0);
+  const pairs = [...modelXml.matchAll(
+    /slic3rpe:mmu_segmentation="([^"]+)" paint_color="([^"]+)"/g
+  )].map(match => match.slice(1));
+  assert.ok(pairs.length > 0);
+  assert.ok(pairs.every(([prusa, bambu]) => prusa === bambu));
+  assert.deepEqual(new Set(pairs.map(([encoding]) => encoding)), new Set(['4', '8', '0C']));
+});
+
+test('3MF TriangleSelector encoding uses continuation nibbles above extruder 17', async () => {
+  const labels = new Uint8Array([
+    0, 16,
+    17, 31,
+  ]);
+  const root = createQuantizedSquareRoot(labels, 2, 2);
+  const palette = Array.from({ length: 32 }, (_, index) => [index * 8, index * 8, index * 8]);
+  root._quantizedPalette = palette;
+  root.children[0].material._quantizedPalette = palette;
+
+  const modelXml = await exportedModelXml(root, 0);
+  const encodings = new Set([...modelXml.matchAll(
+    /slic3rpe:mmu_segmentation="([^"]+)"/g
+  )].map(match => match[1]));
+  assert.deepEqual(encodings, new Set(['4', 'EC', '0FC', 'EFC']));
 });
 
 test('3MF tracing preserves the shared split sequence across UV seams', async () => {

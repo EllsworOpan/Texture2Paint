@@ -1602,7 +1602,7 @@
             <span style="font-size: 10px; color: var(--text-faint);">Max Contour Error</span>
           </div>
           <div class="proc-slider-row">
-            <input type="number" id="proc-paint-resolution" min="0" max="2.00" step="0.05" value="0.10" class="proc-num-input"
+            <input type="number" id="proc-paint-resolution" min="0" max="2.00" step="0.05" value="0" class="proc-num-input"
               style="width: 70px;">
             <span style="font-size: 11px; color: var(--text-dim);">mm</span>
           </div>
@@ -2518,7 +2518,7 @@
         const isEnabled = $quantizeToggle.checked;
         const numColors = parseInt($colorsNum.value || '5', 10);
         const targetSizeMm = parseFloat($('proc-size-num')?.value || '150');
-        const paintResolutionMm = parseFloat($('proc-paint-resolution')?.value || '0.10');
+        const paintResolutionMm = parseFloat($('proc-paint-resolution')?.value || '0');
         const isUvFlipped = viewer.isUvFlipped();
         const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
         const smoothLevel = parseInt($smoothSlider.value || '0', 10);
