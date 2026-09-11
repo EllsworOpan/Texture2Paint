@@ -1,0 +1,13 @@
+{
+  "name": "texture2paint",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "fflate": "0.8.2",
+    "meshoptimizer": "0.24.0",
+    "three": "0.169.0"
+  }
+}

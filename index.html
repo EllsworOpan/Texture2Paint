@@ -890,6 +890,26 @@
       color: var(--warn);
     }
 
+    .repair-diag-status.err {
+      color: var(--err);
+    }
+
+    .paint-budget-message {
+      padding-top: 6px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      color: var(--text-dim);
+      font-size: 10px;
+      line-height: 1.4;
+    }
+
+    .paint-budget-message.warn {
+      color: var(--warn);
+    }
+
+    .paint-budget-message.err {
+      color: var(--err);
+    }
+
     .repair-diag-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -1288,7 +1308,8 @@
   "imports": {
     "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
     "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/",
-    "fflate": "https://unpkg.com/fflate@0.8.2/esm/browser.js"
+    "fflate": "https://unpkg.com/fflate@0.8.2/esm/browser.js",
+    "meshoptimizer": "https://unpkg.com/meshoptimizer@0.24.0/meshopt_simplifier.module.js"
   }
 }
 </script>
@@ -1439,6 +1460,34 @@
         </div>
       </div>
       </div>
+
+    <!-- Optional, scale-independent geometry simplification -->
+    <div class="proc-section">
+      <div class="proc-label-row">
+        <span class="proc-label-with-help">
+          <span class="proc-label">Mesh Simplification</span>
+          <button class="proc-help" type="button" aria-label="About mesh simplification" aria-expanded="false"
+            aria-describedby="proc-tooltip" data-help="Reduce redundant geometry before paint contours are generated. The detail slider limits geometric deviation rather than requesting a triangle count. UV seams, material boundaries, open edges, vertex colors, and separate components are preserved.">i</button>
+        </span>
+        <span class="status-badge badge-normal" id="simplify-badge">OFF</span>
+      </div>
+      <div class="toggle-row" style="margin-bottom: 6px;">
+        <span class="toggle-text">Simplify Mesh</span>
+        <label class="switch" for="proc-simplify-toggle" aria-label="Simplify Mesh">
+          <input type="checkbox" id="proc-simplify-toggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="proc-dependent" data-enabled-by="proc-simplify-toggle">
+        <div class="proc-label-row" style="margin-top: 4px;">
+          <label for="proc-simplify-slider" class="proc-tag">Level of Detail</label>
+          <span id="proc-simplify-level" style="font-size: 10px; color: var(--text-faint);">Balanced</span>
+        </div>
+        <div class="proc-slider-row">
+          <input type="range" id="proc-simplify-slider" min="0" max="100" step="1" value="65">
+        </div>
+      </div>
+    </div>
 
     <!-- Floating textured sheets -> receiver texture bake -->
     <div class="proc-section">
@@ -1618,6 +1667,60 @@
             <span style="font-size: 11px; color: var(--text-dim);">mm</span>
           </div>
         </div>
+
+        <div class="proc-section">
+          <div class="proc-label-row">
+            <span class="proc-label-with-help">
+              <span class="proc-label">Paint Geometry</span>
+              <button class="proc-help" type="button" aria-label="About paint geometry" aria-expanded="false"
+                aria-describedby="proc-tooltip" data-help="Refined boundaries subdivide the mesh along color contours for crisp paint edges. Existing-triangle mode assigns one printable color to each current triangle without adding geometry. The projection is advisory and never changes an explicit override.">i</button>
+            </span>
+            <span class="status-badge badge-normal" id="paint-mode-badge">REFINED</span>
+          </div>
+
+          <div class="proc-dependent" data-enabled-by="proc-quantize-toggle">
+            <div class="toggle-row" style="margin-bottom: 7px;">
+              <span class="toggle-text">Refine Color Boundaries</span>
+              <label class="switch" for="proc-refine-boundaries" aria-label="Refine Color Boundaries">
+                <input type="checkbox" id="proc-refine-boundaries" checked>
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="repair-diag-card" aria-live="polite">
+            <div class="repair-diag-header">
+              <span class="repair-diag-status" id="paint-budget-status">● Load a model to analyze</span>
+            </div>
+            <div class="repair-diag-grid">
+              <div class="repair-diag-item">
+                <span class="repair-diag-label">Geometry</span>
+                <span class="repair-diag-val" id="paint-budget-source">-</span>
+              </div>
+              <div class="repair-diag-item">
+                <span class="repair-diag-label">Refined Estimate</span>
+                <span class="repair-diag-val" id="paint-budget-projected">-</span>
+              </div>
+              <div class="repair-diag-item">
+                <span class="repair-diag-label">Boundary Segments</span>
+                <span class="repair-diag-val" id="paint-budget-contours">-</span>
+              </div>
+              <div class="repair-diag-item">
+                <span class="repair-diag-label">Recommended Headroom</span>
+                <span class="repair-diag-val" id="paint-budget-headroom">-</span>
+              </div>
+              <div class="repair-diag-item">
+                <span class="repair-diag-label">Current Mode</span>
+                <span class="repair-diag-val" id="paint-budget-mode">Refined</span>
+              </div>
+              <div class="repair-diag-item">
+                <span class="repair-diag-label">Expected Output</span>
+                <span class="repair-diag-val" id="paint-budget-output">-</span>
+              </div>
+            </div>
+            <p class="paint-budget-message" id="paint-budget-message">Enable color quantization to forecast painted output.</p>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1722,7 +1825,10 @@
       linkGlbOriginalTextures,
       getModelTextures,
       applyLiveMeshRepair,
-      analyzeMeshHealth
+      analyzeMeshHealth,
+      applyLiveMeshSimplification,
+      estimatePaintOutputBudget,
+      RECOMMENDED_PAINT_OUTPUT_TRIANGLES
     } from './src/processor.js';
     import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
     import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -1769,6 +1875,20 @@
     const $diagSubmeshes = $('diag-submeshes');
     const $diagWelded = $('diag-welded');
     const $reanalyzeBtn = $('proc-reanalyze-btn');
+    const $simplifyToggle = $('proc-simplify-toggle');
+    const $simplifySlider = $('proc-simplify-slider');
+    const $simplifyLevel = $('proc-simplify-level');
+    const $simplifyBadge = $('simplify-badge');
+    const $refineBoundariesToggle = $('proc-refine-boundaries');
+    const $paintModeBadge = $('paint-mode-badge');
+    const $paintBudgetStatus = $('paint-budget-status');
+    const $paintBudgetSource = $('paint-budget-source');
+    const $paintBudgetProjected = $('paint-budget-projected');
+    const $paintBudgetContours = $('paint-budget-contours');
+    const $paintBudgetHeadroom = $('paint-budget-headroom');
+    const $paintBudgetMode = $('paint-budget-mode');
+    const $paintBudgetOutput = $('paint-budget-output');
+    const $paintBudgetMessage = $('paint-budget-message');
     const $exportProcBtn = $('export-processed-btn');
     const $procBadge = $('proc-model-badge');
     const $textureList = $('proc-texture-list');
@@ -1877,7 +1997,7 @@
     }
 
     function syncAllDependentControls() {
-      [$decalBakeToggle, $procRepairToggle, $quantizeToggle]
+      [$decalBakeToggle, $procRepairToggle, $simplifyToggle, $quantizeToggle]
         .forEach(syncDependentControls);
     }
 
@@ -1911,10 +2031,14 @@
     let rebuildRevision = 0;
     let sourceRevision = 0;
     let activeStructuralKey = null;
-    let activeStructuralResults = { decalResult: null, repairResult: null };
+    let activeStructuralResults = { decalResult: null, repairResult: null, simplificationResult: null };
     const decalStageCache = new Map();
     const repairStageCache = new Map();
+    const simplifyStageCache = new Map();
     const meshHealthCache = new Map();
+    const paintBudgetCache = new Map();
+    let paintModePreference = 'auto';
+    let lastPaintBudgetEstimate = null;
     let materialEffectsPreference = true;
 
     function disposeStageCache(cache) {
@@ -1926,12 +2050,16 @@
       rebuildRevision++;
       clearTimeout(quantizeTimer);
       clearTimeout(repairTimer);
+      clearTimeout(simplifyTimer);
+      clearTimeout(paintBudgetTimer);
       clearTimeout(decalSettingsTimer);
       disposeStageCache(decalStageCache);
       disposeStageCache(repairStageCache);
+      disposeStageCache(simplifyStageCache);
       meshHealthCache.clear();
+      paintBudgetCache.clear();
       activeStructuralKey = null;
-      activeStructuralResults = { decalResult: null, repairResult: null };
+      activeStructuralResults = { decalResult: null, repairResult: null, simplificationResult: null };
     }
 
     function cacheStage(cache, key, model, result, limit = 2) {
@@ -2327,12 +2455,18 @@
         closeHoles: $procCloseHoles.checked,
         joinSubmeshes: $procJoinSubmeshes.checked,
       } : null;
+      const simplification = $simplifyToggle.checked ? {
+        lod: parseInt($simplifySlider.value || '65', 10),
+      } : null;
       const decalKey = JSON.stringify({ sourceRevision, decal });
+      const repairKey = JSON.stringify({ decalKey, repair });
       return {
         decal,
         repair,
+        simplification,
         decalKey,
-        key: JSON.stringify({ decalKey, repair }),
+        repairKey,
+        key: JSON.stringify({ repairKey, simplification }),
       };
     }
 
@@ -2365,7 +2499,7 @@
 
       let repairResult = null;
       if (settings.repair) {
-        const cached = cloneCachedStage(repairStageCache, settings.key);
+        const cached = cloneCachedStage(repairStageCache, settings.repairKey);
         if (cached) {
           disposeModelResources(nextModel);
           nextModel = cached.model;
@@ -2375,11 +2509,33 @@
             enabled: true,
             ...settings.repair,
           });
-          cacheStage(repairStageCache, settings.key, nextModel, repairResult);
+          cacheStage(repairStageCache, settings.repairKey, nextModel, repairResult);
+        }
+      }
+
+      let simplificationResult = null;
+      if (settings.simplification) {
+        const cached = cloneCachedStage(simplifyStageCache, settings.key);
+        if (cached) {
+          disposeModelResources(nextModel);
+          nextModel = cached.model;
+          simplificationResult = cached.result;
+        } else {
+          $simplifyBadge.textContent = 'WORKING';
+          $simplifyBadge.className = 'status-badge badge-warn';
+          simplificationResult = await applyLiveMeshSimplification(nextModel, {
+            enabled: true,
+            lod: settings.simplification.lod,
+          });
+          if (revision !== rebuildRevision) {
+            disposeModelResources(nextModel);
+            return null;
+          }
+          cacheStage(simplifyStageCache, settings.key, nextModel, simplificationResult);
         }
       }
       nextModel._texture2PaintProcessingRevision = settings.key;
-      return { model: nextModel, decalResult, repairResult };
+      return { model: nextModel, decalResult, repairResult, simplificationResult };
     }
 
     async function rebuildProcessedModel({
@@ -2393,7 +2549,7 @@
       const settings = currentStructuralSettings();
       const structuralChanged = forceStructural || settings.key !== activeStructuralKey || !viewer.currentModel;
       let nextModel = viewer.currentModel;
-      let { decalResult, repairResult } = activeStructuralResults;
+      let { decalResult, repairResult, simplificationResult } = activeStructuralResults;
 
       if (structuralChanged) {
         const built = await buildStructuralModel(settings, revision);
@@ -2401,6 +2557,7 @@
         nextModel = built.model;
         decalResult = built.decalResult;
         repairResult = built.repairResult;
+        simplificationResult = built.simplificationResult;
       }
       if (revision !== rebuildRevision) {
         if (structuralChanged) disposeModelResources(nextModel);
@@ -2431,7 +2588,7 @@
       if (structuralChanged) {
         ({ triangles } = viewer.replaceObject(nextModel, { frame: false, uvFlipped: false }));
         activeStructuralKey = settings.key;
-        activeStructuralResults = { decalResult, repairResult };
+        activeStructuralResults = { decalResult, repairResult, simplificationResult };
         updateMeshDiagnostics();
       }
       updateInfoDisplay(triangles);
@@ -2456,12 +2613,24 @@
         $repairBadge.className = 'status-badge badge-normal';
       }
 
+      if ($simplifyToggle.checked && simplificationResult) {
+        const removed = simplificationResult.removedTriangles;
+        $simplifyBadge.textContent = removed > 0
+          ? `${Math.round(removed / Math.max(1, simplificationResult.originalTriangles) * 100)}% LESS`
+          : 'UNCHANGED';
+        $simplifyBadge.className = 'status-badge ' + (removed > 0 ? 'badge-ok' : 'badge-normal');
+      } else {
+        $simplifyBadge.textContent = 'OFF';
+        $simplifyBadge.className = 'status-badge badge-normal';
+      }
+      schedulePaintBudgetAnalysis();
+
       if (reason) {
         const failures = decalResult?.details?.filter(detail => detail.error || detail.pixels === 0).length || 0;
         const suffix = failures ? ` · ${failures} sheet${failures === 1 ? '' : 's'} could not be projected` : '';
         toast(`${reason}${suffix}`, failures ? 'work' : 'ok', 2200);
       }
-      return { decalResult, repairResult, triangles };
+      return { decalResult, repairResult, simplificationResult, triangles };
     }
 
     async function handleFiles(fileList) {
@@ -2518,6 +2687,7 @@
         sourceModelDocument = null;
         const { triangles } = viewer.loadObject(loaded.object);
         sourceRevision++;
+        resetPaintModeForNewModel();
         sourceModelDocument = cloneModelForProcessing(viewer.currentModel);
         revokeUrls(lastResourceUrls);
         lastResourceUrls = resources.urls;
@@ -2535,7 +2705,7 @@
         decalAnalysis = analyzeFloatingDecals(sourceModelDocument);
         renderDecalCandidates();
         const initialSettings = currentStructuralSettings();
-        if (!$procRepairToggle.checked) {
+        if (!$procRepairToggle.checked && !$simplifyToggle.checked) {
           activeStructuralKey = initialSettings.key;
           viewer.currentModel._texture2PaintProcessingRevision = initialSettings.key;
         }
@@ -2547,11 +2717,13 @@
 
         // Analyze once for this structural model; repaired models are analyzed
         // after the repaired stage replaces the viewport object.
-        if (!$procRepairToggle.checked) updateMeshDiagnostics();
+        if (!$procRepairToggle.checked && !$simplifyToggle.checked) updateMeshDiagnostics();
 
         // Initialize palette and swatches immediately on file load
         activePalette = [];
-        updateQuantization(false, { forceStructural: $procRepairToggle.checked });
+        updateQuantization(false, {
+          forceStructural: $procRepairToggle.checked || $simplifyToggle.checked
+        });
       } catch (err) {
         revokeUrls(resources.urls);
         throw err;
@@ -2657,13 +2829,15 @@
           activePalette,
           despeckleSize,
           smoothLevel,
-          paintResolutionMm
+          paintResolutionMm,
+          {
+            refineBoundaries: $refineBoundariesToggle.checked,
+            overrideBudget: paintModePreference === 'override',
+          }
         );
         const bake = viewer.currentModel._lastPaintBake;
-        if (bake?.refinementLimited) {
-          toast(`Paint bake reached its ${bake.triangleCount.toLocaleString()}-triangle safety limit; use a larger Boundary Accuracy value for a complete bake.`, 'work', 5000);
-        } else if (bake?.denseMeshPaintFallback) {
-          toast(`Paint was assigned across the model's ${bake.triangleCount.toLocaleString()} existing fine triangles to stay within the 3MF safety limit.`, 'ok', 5000);
+        if (bake?.paintMode === 'existing-triangles') {
+          toast(`Paint was assigned across the model's ${bake.triangleCount.toLocaleString()} existing triangles.`, 'ok', 5000);
         } else if (bake?.faceSamplingFallbacks) {
           toast(`${bake.faceSamplingFallbacks.toLocaleString()} numerically complex paint face${bake.faceSamplingFallbacks === 1 ? '' : 's'} used safe per-face sampling.`, 'work', 5000);
         }
@@ -2865,6 +3039,191 @@
     $decalMode.addEventListener('change', () => {
       if ($decalBakeToggle.checked) rebuildProcessedModel({ reason: 'Changed decal projection direction' });
     });
+
+    // ── Mesh simplification and adaptive paint budget ───────────────────────
+
+    function simplificationLevelLabel(value) {
+      if (value <= 25) return 'Coarse';
+      if (value <= 50) return 'Strong';
+      if (value <= 80) return 'Balanced';
+      return 'Fine';
+    }
+
+    function updatePaintModeUI(estimate = lastPaintBudgetEstimate) {
+      const refined = $refineBoundariesToggle.checked;
+      const override = refined && paintModePreference === 'override';
+      $paintModeBadge.textContent = override ? 'OVERRIDE' : (refined ? 'REFINED' : 'TRIANGLES');
+      $paintModeBadge.className = 'status-badge ' + (override ? 'badge-warn' : 'badge-normal');
+      $paintBudgetMode.textContent = override ? 'Refined Override' : (refined ? 'Refined' : 'Existing Triangles');
+      $paintBudgetOutput.textContent = estimate
+        ? (refined ? estimate.projectedTriangles : estimate.sourceTriangles).toLocaleString()
+        : '-';
+    }
+
+    function resetPaintModeForNewModel() {
+      paintModePreference = 'auto';
+      lastPaintBudgetEstimate = null;
+      $refineBoundariesToggle.checked = true;
+      updatePaintModeUI(null);
+    }
+
+    function resetPaintBudgetUI(message = 'Enable color quantization to forecast painted output.') {
+      const triangles = viewer.currentModel ? viewer.countTriangles(viewer.currentModel) : 0;
+      lastPaintBudgetEstimate = null;
+      $paintBudgetStatus.textContent = viewer.currentModel ? '● Awaiting color preview' : '● Load a model to analyze';
+      $paintBudgetStatus.className = 'repair-diag-status';
+      $paintBudgetSource.textContent = triangles ? triangles.toLocaleString() : '-';
+      $paintBudgetProjected.textContent = '-';
+      $paintBudgetContours.textContent = '-';
+      $paintBudgetHeadroom.textContent = triangles
+        ? (RECOMMENDED_PAINT_OUTPUT_TRIANGLES - triangles).toLocaleString()
+        : '-';
+      $paintBudgetMessage.textContent = message;
+      $paintBudgetMessage.className = 'paint-budget-message';
+      updatePaintModeUI(null);
+    }
+
+    function renderPaintBudget(estimate) {
+      if (!estimate) {
+        resetPaintBudgetUI('No visible triangles are available to analyze.');
+        return;
+      }
+      lastPaintBudgetEstimate = estimate;
+      if (estimate.status === 'over' && paintModePreference === 'auto') {
+        $refineBoundariesToggle.checked = false;
+      } else if (estimate.status !== 'over' && paintModePreference === 'auto') {
+        $refineBoundariesToggle.checked = true;
+      } else if (estimate.status !== 'over' && paintModePreference === 'override') {
+        paintModePreference = 'auto';
+        $refineBoundariesToggle.checked = true;
+      }
+      const utilization = Math.round(estimate.utilization * 100);
+      $paintBudgetSource.textContent = estimate.sourceTriangles.toLocaleString();
+      $paintBudgetProjected.textContent = estimate.projectedTriangles.toLocaleString();
+      $paintBudgetContours.textContent = estimate.estimatedBoundarySegments.toLocaleString();
+      $paintBudgetHeadroom.textContent = estimate.headroom >= 0
+        ? estimate.headroom.toLocaleString()
+        : `${Math.abs(estimate.headroom).toLocaleString()} over`;
+      const confidence = estimate.confidence === 'high' ? '' : ` · ${estimate.confidence} confidence`;
+      updatePaintModeUI(estimate);
+
+      if (estimate.status === 'over') {
+        if ($refineBoundariesToggle.checked && paintModePreference === 'override') {
+          $paintBudgetStatus.textContent = `● Refined override enabled (${utilization}%)`;
+          $paintBudgetStatus.className = 'repair-diag-status err';
+          $paintBudgetMessage.textContent = 'The recommended budget is being ignored. Export will attempt the full refined result without an application limit and may be slow, exhaust memory, freeze the tab, or fail. It will not silently fall back.';
+          $paintBudgetMessage.className = 'paint-budget-message err';
+        } else {
+          $paintBudgetStatus.textContent = `● Over recommendation (${utilization}%)`;
+          $paintBudgetStatus.className = 'repair-diag-status warn';
+          $paintBudgetMessage.textContent = paintModePreference === 'auto'
+            ? 'Boundary refinement was switched off automatically. Turn it back on to explicitly override the recommendation, or simplify, increase Boundary Accuracy, or despeckle first.'
+            : 'Existing-triangle painting is selected. Turn on boundary refinement to attempt the projected result with an explicit override.';
+          $paintBudgetMessage.className = 'paint-budget-message warn';
+        }
+      } else if (estimate.status === 'warning') {
+        $paintBudgetStatus.textContent = $refineBoundariesToggle.checked
+          ? `● Limited recommended headroom (${utilization}%)`
+          : '● Existing-triangle painting selected';
+        $paintBudgetStatus.className = 'repair-diag-status warn';
+        $paintBudgetMessage.textContent = $refineBoundariesToggle.checked
+          ? `The refined result is approaching the recommended one-million-triangle budget${confidence}. Simplification, Boundary Accuracy, or despeckle can reduce it.`
+          : `The refined estimate is approaching the recommendation${confidence}, but the selected output uses only existing triangles.`;
+        $paintBudgetMessage.className = 'paint-budget-message warn';
+      } else {
+        $paintBudgetStatus.textContent = $refineBoundariesToggle.checked
+          ? `● Refined projection healthy (${utilization}%)`
+          : '● Existing-triangle painting selected';
+        $paintBudgetStatus.className = 'repair-diag-status ok';
+        $paintBudgetMessage.textContent = $refineBoundariesToggle.checked
+          ? `Projected from a stratified sample of the processed color boundaries${confidence}.`
+          : `The selected output assigns one color to each of the ${estimate.sourceTriangles.toLocaleString()} existing triangles; the refined projection remains visible for comparison.`;
+        $paintBudgetMessage.className = 'paint-budget-message';
+      }
+    }
+
+    let paintBudgetTimer;
+    function schedulePaintBudgetAnalysis() {
+      clearTimeout(paintBudgetTimer);
+      if (!viewer.currentModel || !$quantizeToggle.checked) {
+        resetPaintBudgetUI();
+        return;
+      }
+      $paintBudgetStatus.textContent = '● Analyzing paint boundaries…';
+      $paintBudgetStatus.className = 'repair-diag-status';
+      paintBudgetTimer = setTimeout(() => {
+        const model = viewer.currentModel;
+        const analysisRevision = rebuildRevision;
+        const targetSizeMm = parseFloat($('proc-size-num')?.value || '150');
+        const paintResolutionMm = parseFloat($('proc-paint-resolution')?.value || '0');
+        const cacheKey = [
+          activeStructuralKey || model.uuid,
+          activePalette.map(color => color.join(',')).join(';'),
+          $despeckleNum.value,
+          $smoothSlider.value,
+          targetSizeMm,
+          paintResolutionMm,
+        ].join('|');
+        try {
+          let estimate = paintBudgetCache.get(cacheKey);
+          if (!estimate) {
+            estimate = estimatePaintOutputBudget(model, { targetSizeMm, paintResolutionMm });
+            paintBudgetCache.set(cacheKey, estimate);
+            while (paintBudgetCache.size > 8) paintBudgetCache.delete(paintBudgetCache.keys().next().value);
+          }
+          if (analysisRevision === rebuildRevision && model === viewer.currentModel) renderPaintBudget(estimate);
+        } catch (error) {
+          if (analysisRevision !== rebuildRevision || model !== viewer.currentModel) return;
+          resetPaintBudgetUI('Boundary projection could not be estimated. Refined export remains available, and any failure will be reported rather than silently changing modes.');
+          console.warn('Paint budget analysis failed:', error);
+        }
+      }, 180);
+    }
+
+    $refineBoundariesToggle.addEventListener('change', () => {
+      if ($refineBoundariesToggle.checked && lastPaintBudgetEstimate?.status === 'over') {
+        const accepted = window.confirm(
+          `The refined result is estimated at ${lastPaintBudgetEstimate.projectedTriangles.toLocaleString()} triangles, above the ${lastPaintBudgetEstimate.maxOutputTriangles.toLocaleString()}-triangle recommendation.\n\n` +
+          'Override it anyway? The export will have no application-imposed resource limit. It may be slow, exhaust memory, freeze this tab, or fail, and it will not silently fall back.'
+        );
+        if (!accepted) {
+          $refineBoundariesToggle.checked = false;
+          paintModePreference = 'auto';
+          renderPaintBudget(lastPaintBudgetEstimate);
+          return;
+        }
+        paintModePreference = 'override';
+      } else {
+        paintModePreference = $refineBoundariesToggle.checked ? 'auto' : 'existing-triangles';
+      }
+      if (lastPaintBudgetEstimate) renderPaintBudget(lastPaintBudgetEstimate);
+      else updatePaintModeUI(null);
+    });
+
+    let simplifyTimer;
+    function updateMeshSimplification(showToast = false) {
+      clearTimeout(simplifyTimer);
+      simplifyTimer = setTimeout(() => {
+        rebuildProcessedModel({
+          reason: showToast
+            ? ($simplifyToggle.checked ? 'Simplified the mesh within the selected detail limit' : 'Restored the original mesh detail')
+            : ''
+        });
+      }, 180);
+    }
+
+    $simplifyToggle.addEventListener('change', () => {
+      syncDependentControls($simplifyToggle);
+      updateMeshSimplification(true);
+    });
+
+    $simplifySlider.addEventListener('input', () => {
+      $simplifyLevel.textContent = simplificationLevelLabel(parseInt($simplifySlider.value, 10));
+      if ($simplifyToggle.checked) updateMeshSimplification(false);
+    });
+
+    $('proc-size-num').addEventListener('input', schedulePaintBudgetAnalysis);
+    $('proc-paint-resolution').addEventListener('input', schedulePaintBudgetAnalysis);
 
     // ── Mesh Repair & Sealing Logic ──────────────────────────────────────────
 

@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { zip, zipSync, strToU8 } from 'fflate';
+import { MeshoptSimplifier } from 'meshoptimizer';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
 /**
  * Converts any attribute to Float32BufferAttribute.
@@ -355,6 +357,284 @@ export function cloneModelForProcessing(rootObject) {
     child._originalGeometry = child.geometry?.clone();
   });
   return clone;
+}
+
+const MIN_SIMPLIFICATION_ERROR = 0.00001;
+const MAX_SIMPLIFICATION_ERROR = 0.005;
+
+/**
+ * Maps the user-facing 0-100 detail slider to meshoptimizer's relative
+ * geometric error. The exponential curve keeps most of the slider's travel
+ * in the subtle range while still making a deliberately coarse setting
+ * available for exceptionally dense assets.
+ */
+export function meshSimplificationErrorForLod(lod = 65) {
+  const normalizedDetail = Math.max(0, Math.min(100, Number(lod) || 0)) / 100;
+  return MAX_SIMPLIFICATION_ERROR *
+    Math.pow(MIN_SIMPLIFICATION_ERROR / MAX_SIMPLIFICATION_ERROR, normalizedDetail);
+}
+
+function simplificationAttributeData(geometry) {
+  const attributes = [];
+  let stride = 0;
+  for (const [name, attribute] of Object.entries(geometry.attributes)) {
+    if (name === 'position' || !attribute || attribute.count !== geometry.attributes.position.count) continue;
+    if (!/^(normal|tangent|uv\d*|color)$/u.test(name)) continue;
+    for (let component = 0; component < attribute.itemSize && stride < 32; component++) {
+      let weight = 0.05;
+      if (name.startsWith('uv')) weight = 0.5;
+      else if (name === 'color') weight = 0.2;
+      else if (name === 'normal') weight = 0.1;
+      attributes.push({ attribute, component, weight });
+      stride++;
+    }
+    if (stride >= 32) break;
+  }
+  if (stride === 0) return null;
+
+  const vertexCount = geometry.attributes.position.count;
+  const packed = new Float32Array(vertexCount * stride);
+  for (let vertex = 0; vertex < vertexCount; vertex++) {
+    for (let component = 0; component < stride; component++) {
+      const source = attributes[component];
+      packed[vertex * stride + component] = source.attribute.getComponent(vertex, source.component);
+    }
+  }
+  return { packed, stride, weights: attributes.map(attribute => attribute.weight) };
+}
+
+function compactGeometryToIndices(source, sourceIndices, groups) {
+  const remap = new Map();
+  const originalVertices = [];
+  const compactIndices = new Uint32Array(sourceIndices.length);
+  for (let offset = 0; offset < sourceIndices.length; offset++) {
+    const sourceIndex = sourceIndices[offset];
+    let compactIndex = remap.get(sourceIndex);
+    if (compactIndex === undefined) {
+      compactIndex = originalVertices.length;
+      remap.set(sourceIndex, compactIndex);
+      originalVertices.push(sourceIndex);
+    }
+    compactIndices[offset] = compactIndex;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  for (const [name, attribute] of Object.entries(source.attributes)) {
+    let next;
+    if (!attribute.isInterleavedBufferAttribute && attribute.array) {
+      const values = new attribute.array.constructor(originalVertices.length * attribute.itemSize);
+      for (let vertex = 0; vertex < originalVertices.length; vertex++) {
+        const sourceOffset = originalVertices[vertex] * attribute.itemSize;
+        const targetOffset = vertex * attribute.itemSize;
+        for (let component = 0; component < attribute.itemSize; component++) {
+          values[targetOffset + component] = attribute.array[sourceOffset + component];
+        }
+      }
+      next = new THREE.BufferAttribute(values, attribute.itemSize, attribute.normalized);
+    } else {
+      const values = new Float32Array(originalVertices.length * attribute.itemSize);
+      for (let vertex = 0; vertex < originalVertices.length; vertex++) {
+        for (let component = 0; component < attribute.itemSize; component++) {
+          values[vertex * attribute.itemSize + component] =
+            attribute.getComponent(originalVertices[vertex], component);
+        }
+      }
+      next = new THREE.BufferAttribute(values, attribute.itemSize, false);
+    }
+    next.name = attribute.name;
+    next.usage = attribute.usage;
+    geometry.setAttribute(name, next);
+  }
+
+  const indexValues = originalVertices.length <= 65535
+    ? new Uint16Array(compactIndices)
+    : compactIndices;
+  geometry.setIndex(new THREE.BufferAttribute(indexValues, 1));
+  for (const group of groups) geometry.addGroup(group.start, group.count, group.materialIndex);
+  geometry.name = source.name;
+  geometry.userData = { ...source.userData };
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function fullGeometryGroups(geometry, indexCount) {
+  if (!geometry.groups?.length) return [{ start: 0, count: indexCount, materialIndex: 0 }];
+  const groups = [];
+  const sourceGroups = geometry.groups
+    .map(group => ({
+      start: Math.max(0, group.start),
+      end: Math.min(indexCount, group.start + group.count),
+      materialIndex: group.materialIndex || 0,
+    }))
+    .filter(group => group.end > group.start)
+    .sort((left, right) => left.start - right.start);
+  const triangleCount = Math.floor(indexCount / 3);
+  let sourceGroupIndex = 0;
+  const materialAtTriangle = triangle => {
+    const elementOffset = triangle * 3;
+    while (sourceGroupIndex < sourceGroups.length &&
+      sourceGroups[sourceGroupIndex].end <= elementOffset) sourceGroupIndex++;
+    const group = sourceGroups[sourceGroupIndex];
+    return group && elementOffset >= group.start && elementOffset < group.end
+      ? group.materialIndex
+      : 0;
+  };
+  let activeMaterial = materialAtTriangle(0);
+  let activeStart = 0;
+  for (let triangle = 1; triangle < triangleCount; triangle++) {
+    const materialIndex = materialAtTriangle(triangle);
+    if (materialIndex === activeMaterial) continue;
+    groups.push({ start: activeStart * 3, count: (triangle - activeStart) * 3, materialIndex: activeMaterial });
+    activeStart = triangle;
+    activeMaterial = materialIndex;
+  }
+  if (triangleCount > activeStart) {
+    groups.push({
+      start: activeStart * 3,
+      count: (triangleCount - activeStart) * 3,
+      materialIndex: activeMaterial,
+    });
+  }
+  return groups;
+}
+
+function hasUnsupportedSimplificationAnimation(mesh, geometry) {
+  if (mesh.isSkinnedMesh) return true;
+  return Object.values(geometry.morphAttributes || {}).some(attributes => attributes?.length);
+}
+
+/**
+ * Simplifies ordinary triangle meshes while retaining their original vertex
+ * attributes. Material subsets and open borders are simplified independently
+ * with locked edges, so this operation does not join components, repair holes,
+ * cross UV seams, or discard vertex alpha. Animated geometry is left intact.
+ */
+export async function applyLiveMeshSimplification(rootObject, {
+  enabled = true,
+  lod = 65,
+  simplifier = MeshoptSimplifier,
+} = {}) {
+  if (!rootObject || !enabled) {
+    return { enabled: false, originalTriangles: 0, triangles: 0, removedTriangles: 0, skippedMeshes: 0 };
+  }
+  if (!simplifier?.supported) throw new Error('Mesh simplification is not supported by this browser.');
+  await simplifier.ready;
+
+  const targetError = meshSimplificationErrorForLod(lod);
+  let originalTriangles = 0;
+  let triangles = 0;
+  let skippedMeshes = 0;
+  let simplifiedMeshes = 0;
+  let maximumRelativeError = 0;
+
+  const meshes = [];
+  rootObject.traverse(mesh => {
+    if (mesh.isMesh && mesh.geometry?.attributes?.position) meshes.push(mesh);
+  });
+
+  for (const mesh of meshes) {
+    let geometry = mesh.geometry;
+    const position = geometry.attributes.position;
+    const elementCount = geometry.index ? geometry.index.count : position.count;
+    const sourceTriangleCount = Math.floor(elementCount / 3);
+    originalTriangles += sourceTriangleCount;
+
+    const drawStart = Math.max(0, geometry.drawRange?.start || 0);
+    const drawCount = geometry.drawRange?.count;
+    const hasPartialDrawRange = drawStart !== 0 ||
+      (Number.isFinite(drawCount) && drawCount < elementCount);
+    if (sourceTriangleCount < 2 || hasPartialDrawRange ||
+      mesh.isBatchedMesh || hasUnsupportedSimplificationAnimation(mesh, geometry)) {
+      triangles += sourceTriangleCount;
+      skippedMeshes++;
+      continue;
+    }
+
+    if (!geometry.index) geometry = mergeVertices(geometry.clone(), 1e-6);
+    const floatPosition = toFloat32Attribute(geometry.attributes.position);
+    if (floatPosition !== geometry.attributes.position) {
+      geometry = geometry.clone();
+      geometry.setAttribute('position', floatPosition);
+    }
+    const indexCount = geometry.index.count;
+    const sourceIndices = new Uint32Array(indexCount);
+    for (let index = 0; index < indexCount; index++) sourceIndices[index] = geometry.index.getX(index);
+    const attributes = simplificationAttributeData(geometry);
+    const sourceGroups = fullGeometryGroups(geometry, indexCount);
+    const simplifiedIndexChunks = [];
+    const simplifiedGroups = [];
+    let outputOffset = 0;
+
+    for (const group of sourceGroups) {
+      const groupIndices = sourceIndices.slice(group.start, group.start + group.count);
+      const targetIndexCount = groupIndices.length >= 3 ? 3 : 0;
+      let result;
+      if (attributes) {
+        result = simplifier.simplifyWithAttributes(
+          groupIndices,
+          floatPosition.array,
+          floatPosition.itemSize,
+          attributes.packed,
+          attributes.stride,
+          attributes.weights,
+          null,
+          targetIndexCount,
+          targetError,
+          ['LockBorder']
+        );
+      } else {
+        result = simplifier.simplify(
+          groupIndices,
+          floatPosition.array,
+          floatPosition.itemSize,
+          targetIndexCount,
+          targetError,
+          ['LockBorder']
+        );
+      }
+      const [indices, error] = result;
+      maximumRelativeError = Math.max(maximumRelativeError, error || 0);
+      simplifiedIndexChunks.push(indices);
+      simplifiedGroups.push({
+        start: outputOffset,
+        count: indices.length,
+        materialIndex: group.materialIndex,
+      });
+      outputOffset += indices.length;
+    }
+
+    const outputTriangleCount = Math.floor(outputOffset / 3);
+    if (outputTriangleCount > 0 && outputTriangleCount < sourceTriangleCount) {
+      const simplifiedIndices = new Uint32Array(outputOffset);
+      let chunkOffset = 0;
+      for (const chunk of simplifiedIndexChunks) {
+        simplifiedIndices.set(chunk, chunkOffset);
+        chunkOffset += chunk.length;
+      }
+      mesh.geometry = compactGeometryToIndices(
+        geometry,
+        simplifiedIndices,
+        simplifiedGroups
+      );
+      triangles += outputTriangleCount;
+      simplifiedMeshes++;
+    } else {
+      triangles += sourceTriangleCount;
+    }
+  }
+
+  return {
+    enabled: true,
+    lod: Math.max(0, Math.min(100, Number(lod) || 0)),
+    targetError,
+    maximumRelativeError,
+    originalTriangles,
+    triangles,
+    removedTriangles: Math.max(0, originalTriangles - triangles),
+    simplifiedMeshes,
+    skippedMeshes,
+  };
 }
 
 function triangleVertexIndex(geometry, triangleIndex, corner) {
@@ -3012,13 +3292,26 @@ function getPrusaMmuHex(extruderId) {
 const PAINT_TRACE_EPSILON = 1e-9;
 const MAX_PAINT_BOUNDARY_SCAN_STEPS = 100000000;
 const MAX_PAINT_BOUNDARY_SEGMENTS = 2000000;
-const MAX_PAINT_OUTPUT_TRIANGLES = 1000000;
+export const RECOMMENDED_PAINT_OUTPUT_TRIANGLES = 1000000;
+// Kept as an API alias for integrations that used the previous name. This is
+// a recommendation for automatic mode, not a format or user-enforced limit.
+export const MAX_PAINT_OUTPUT_TRIANGLES = RECOMMENDED_PAINT_OUTPUT_TRIANGLES;
+
+export function projectPaintOutputTriangles(sourceTriangles, boundarySegments = 0) {
+  const source = Math.max(0, Math.ceil(Number(sourceTriangles) || 0));
+  const boundaries = Math.max(0, Number(boundarySegments) || 0);
+  // A contour crossing usually turns one source triangle into three. The
+  // additional 7.5% covers shared-edge conformity and grid junctions without
+  // pretending that a quick preflight is an exact triangulation.
+  return source + Math.ceil(boundaries * 2.15);
+}
 
 export function shouldUseDenseMeshPaintFallback(
   triangleCount,
-  maxOutputTriangles = MAX_PAINT_OUTPUT_TRIANGLES
+  maxOutputTriangles = MAX_PAINT_OUTPUT_TRIANGLES,
+  estimatedBoundarySegments = 0
 ) {
-  return triangleCount >= maxOutputTriangles * 0.75;
+  return projectPaintOutputTriangles(triangleCount, estimatedBoundarySegments) >= maxOutputTriangles;
 }
 
 function positiveModulo(value, modulus) {
@@ -3178,7 +3471,7 @@ function getRasterBoundaryIndex(raster, traceStats) {
   const horizontal = Array.from({ length: yBoundaryCount }, () => []);
   const comparisons = xBoundaryCount * yCellCount + yBoundaryCount * xCellCount;
   traceStats.scanSteps += comparisons;
-  if (traceStats.scanSteps > MAX_PAINT_BOUNDARY_SCAN_STEPS) {
+  if (!traceStats.ignoreResourceLimits && traceStats.scanSteps > MAX_PAINT_BOUNDARY_SCAN_STEPS) {
     throw new Error('Working textures contain too many texels to trace safely. Reduce the working texture resolution.');
   }
 
@@ -3299,7 +3592,7 @@ function traceDegenerateTextureBoundarySegments(texturePoints, raster, traceStat
     (value, index) => index === 0 || Math.abs(value - candidates[index - 1]) > 1e-10
   );
   traceStats.scanSteps += uniqueCandidates.length;
-  if (traceStats.scanSteps > MAX_PAINT_BOUNDARY_SCAN_STEPS) {
+  if (!traceStats.ignoreResourceLimits && traceStats.scanSteps > MAX_PAINT_BOUNDARY_SCAN_STEPS) {
     throw new Error('Working textures contain too many texels to trace safely. Reduce the working texture resolution.');
   }
 
@@ -3360,7 +3653,7 @@ function traceDegenerateTextureBoundarySegments(texturePoints, raster, traceStat
     if (!segment) continue;
     segments.push(segment);
     traceStats.boundarySegments++;
-    if (traceStats.boundarySegments > MAX_PAINT_BOUNDARY_SEGMENTS) {
+    if (!traceStats.ignoreResourceLimits && traceStats.boundarySegments > MAX_PAINT_BOUNDARY_SEGMENTS) {
       throw new Error('Texture boundary is too complex to trace safely. Despeckle the texture or use a lower working texture resolution.');
     }
   }
@@ -3399,7 +3692,7 @@ function traceSingleTextureBoundarySegments(tri, raster, uvCoordinates, traceSta
     if (!clipped) return;
     segments.push(clipped);
     traceStats.boundarySegments++;
-    if (traceStats.boundarySegments > MAX_PAINT_BOUNDARY_SEGMENTS) {
+    if (!traceStats.ignoreResourceLimits && traceStats.boundarySegments > MAX_PAINT_BOUNDARY_SEGMENTS) {
       throw new Error('Texture boundary is too complex to trace safely. Despeckle the texture or use a lower working texture resolution.');
     }
   };
@@ -3523,7 +3816,7 @@ function traceVertexColorBoundarySegments(tri, traceStats, divisions) {
   }
   traceStats.boundarySegments += segments.length;
   traceStats.scanSteps += divisions * divisions;
-  if (traceStats.boundarySegments > MAX_PAINT_BOUNDARY_SEGMENTS) {
+  if (!traceStats.ignoreResourceLimits && traceStats.boundarySegments > MAX_PAINT_BOUNDARY_SEGMENTS) {
     throw new Error('Vertex-color boundary is too complex to trace safely. Reduce the model complexity.');
   }
   return segments;
@@ -3656,6 +3949,202 @@ function simplifyPaintBoundaryNetwork(segments, tri, toleranceMm) {
     }
   }
   return simplified;
+}
+
+function paintBudgetRasterForMaterial(material) {
+  if (!material?._quantizationEnabled || !material._quantizedLabels) return null;
+  const width = material._quantizedLabelsWidth;
+  const height = material._quantizedLabelsHeight;
+  if (!width || !height || material._quantizedLabels.length !== width * height) return null;
+  const map = material._originalMap || material.map;
+  if (!map) return null;
+  if (map.matrixAutoUpdate !== false) map.updateMatrix?.();
+
+  const analysisScale = Math.max(1, width / 512, height / 512);
+  const analysisWidth = Math.max(1, Math.round(width / analysisScale));
+  const analysisHeight = Math.max(1, Math.round(height / analysisScale));
+  const cached = material._texture2PaintBudgetRaster;
+  if (cached?.labels === material._quantizedLabels && cached.mapVersion === map.version) {
+    return cached;
+  }
+  const analysisLabels = analysisScale === 1
+    ? material._quantizedLabels
+    : new Uint8Array(analysisWidth * analysisHeight);
+  if (analysisScale !== 1) {
+    for (let y = 0; y < analysisHeight; y++) {
+      const sourceY0 = Math.floor(y * height / analysisHeight);
+      const sourceY1 = Math.max(sourceY0 + 1, Math.floor((y + 1) * height / analysisHeight));
+      for (let x = 0; x < analysisWidth; x++) {
+        const sourceX0 = Math.floor(x * width / analysisWidth);
+        const sourceX1 = Math.max(sourceX0 + 1, Math.floor((x + 1) * width / analysisWidth));
+        // Vary the sample phase per block so periodic details do not disappear
+        // when their frequency happens to divide the 512px analysis grid.
+        const hash = (Math.imul(x + 1, 73856093) ^ Math.imul(y + 1, 19349663)) >>> 0;
+        const sourceX = Math.min(width - 1, sourceX0 + hash % (sourceX1 - sourceX0));
+        const sourceY = Math.min(height - 1, sourceY0 + ((hash >>> 8) % (sourceY1 - sourceY0)));
+        analysisLabels[y * analysisWidth + x] = material._quantizedLabels[sourceY * width + sourceX];
+      }
+    }
+  }
+  let rgba = new Uint8ClampedArray(analysisWidth * analysisHeight * 4);
+  rgba.fill(255);
+  const canvas = material._quantizedCanvas;
+  if (canvas?.width === width && canvas?.height === height) {
+    if (analysisScale === 1) {
+      const context = canvas.getContext?.('2d', { willReadFrequently: true });
+      if (context) rgba = new Uint8ClampedArray(context.getImageData(0, 0, width, height).data);
+    } else if (typeof document !== 'undefined') {
+      const analysisCanvas = document.createElement('canvas');
+      analysisCanvas.width = analysisWidth;
+      analysisCanvas.height = analysisHeight;
+      const context = analysisCanvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(canvas, 0, 0, analysisWidth, analysisHeight);
+      rgba = new Uint8ClampedArray(context.getImageData(0, 0, analysisWidth, analysisHeight).data);
+    }
+  }
+  const raster = {
+    width: analysisWidth,
+    height: analysisHeight,
+    labels: analysisLabels,
+    rgba,
+    repeatX: map.repeat?.x ?? 1,
+    repeatY: map.repeat?.y ?? 1,
+    offsetX: map.offset?.x ?? 0,
+    offsetY: map.offset?.y ?? 0,
+    uvMatrix: map.matrix?.elements ? Array.from(map.matrix.elements) : null,
+    wrapS: map.wrapS ?? THREE.ClampToEdgeWrapping,
+    wrapT: map.wrapT ?? THREE.ClampToEdgeWrapping,
+    flipY: map.flipY ?? true,
+    alphaThreshold: Math.min(256, Math.round((material.alphaTest || 0.5) * 255)),
+  };
+  material._texture2PaintBudgetRaster = {
+    labels: material._quantizedLabels,
+    mapVersion: map.version,
+    raster,
+    boundaryScale: analysisScale,
+    approximate: analysisScale > 1,
+  };
+  return material._texture2PaintBudgetRaster;
+}
+
+/**
+ * Estimates the final painted triangle count by tracing a deterministic,
+ * stratified sample of the model's actual quantized texture boundaries. The
+ * hard limit remains exact at export; this preflight exists to choose a path
+ * and provide guidance before doing the full triangulation.
+ */
+export function estimatePaintOutputBudget(rootObject, {
+  targetSizeMm = 150,
+  paintResolutionMm = 0,
+  maxSamples = 2048,
+  maxOutputTriangles = MAX_PAINT_OUTPUT_TRIANGLES,
+} = {}) {
+  if (!rootObject) return null;
+  rootObject.updateWorldMatrix(true, true);
+  const records = [];
+  let sourceTriangles = 0;
+  rootObject.traverse(mesh => {
+    if (!mesh.isMesh || !mesh.geometry?.attributes?.position || !isObjectVisible(mesh)) return;
+    const geometry = mesh.geometry;
+    const elementCount = geometry.index ? geometry.index.count : geometry.attributes.position.count;
+    const total = Math.floor(elementCount / 3);
+    const drawStart = Math.max(0, Math.floor((geometry.drawRange?.start || 0) / 3));
+    const drawCount = Number.isFinite(geometry.drawRange?.count)
+      ? Math.max(0, Math.floor(geometry.drawRange.count / 3))
+      : total;
+    const triangleCount = Math.max(0, Math.min(total, drawStart + drawCount) - drawStart);
+    const copies = mesh.isInstancedMesh ? Math.max(0, mesh.count || 0) : 1;
+    if (!triangleCount || !copies) return;
+    records.push({ mesh, geometry, drawStart, triangleCount, copies });
+    sourceTriangles += triangleCount * copies;
+  });
+  if (!sourceTriangles) return null;
+
+  const rootBox = new THREE.Box3().setFromObject(rootObject);
+  const rootSize = rootBox.getSize(new THREE.Vector3());
+  const maxDimension = Math.max(rootSize.x, rootSize.y, rootSize.z) || 1;
+  const modelScale = (Number(targetSizeMm) || 150) / maxDimension;
+  const tolerance = Math.max(0, Math.min(2, Number(paintResolutionMm) || 0));
+  const traceStats = { scanSteps: 0, boundarySegments: 0, degenerateUvTriangles: 0 };
+  let weightedSegments = 0;
+  let sampledTriangles = 0;
+  let analyzableTriangles = 0;
+  let uncertainTriangles = 0;
+  let approximateTriangles = 0;
+  const p0 = new THREE.Vector3();
+  const p1 = new THREE.Vector3();
+  const p2 = new THREE.Vector3();
+
+  for (const record of records) {
+    const { mesh, geometry, drawStart, triangleCount, copies } = record;
+    const recordWeight = triangleCount * copies;
+    const sampleCount = Math.min(
+      triangleCount,
+      Math.max(1, Math.round(maxSamples * recordWeight / sourceTriangles))
+    );
+    const position = geometry.attributes.position;
+    for (let sample = 0; sample < sampleCount; sample++) {
+      const triangleIndex = drawStart + Math.min(
+        triangleCount - 1,
+        Math.floor((sample + 0.5) * triangleCount / sampleCount)
+      );
+      const material = materialAt(mesh, triangleMaterialIndex(geometry, triangleIndex));
+      const map = material?._originalMap || material?.map;
+      const rasterInfo = paintBudgetRasterForMaterial(material);
+      const colorAttribute = material?.vertexColors ? geometry.getAttribute('color') : null;
+      const sampleWeight = recordWeight / sampleCount;
+      sampledTriangles++;
+      if (!rasterInfo || !map) {
+        if (map || colorAttribute || material?.alphaMap) uncertainTriangles += sampleWeight;
+        continue;
+      }
+      const channel = Math.max(0, Math.floor(Number(map.channel) || 0));
+      const uv = geometry.getAttribute(channel === 0 ? 'uv' : `uv${channel}`);
+      if (!uv) {
+        uncertainTriangles += sampleWeight;
+        continue;
+      }
+      const ids = [0, 1, 2].map(corner => triangleVertexIndex(geometry, triangleIndex, corner));
+      const uvCoordinates = ids.map(index => [uv.getX(index), uv.getY(index)]);
+      const before = traceStats.boundarySegments;
+      const segments = traceSingleTextureBoundarySegments({}, rasterInfo.raster, uvCoordinates, traceStats);
+      let segmentCount = traceStats.boundarySegments - before;
+      if (tolerance > 0 && segments.length > 1) {
+        p0.fromBufferAttribute(position, ids[0]).applyMatrix4(mesh.matrixWorld).multiplyScalar(modelScale);
+        p1.fromBufferAttribute(position, ids[1]).applyMatrix4(mesh.matrixWorld).multiplyScalar(modelScale);
+        p2.fromBufferAttribute(position, ids[2]).applyMatrix4(mesh.matrixWorld).multiplyScalar(modelScale);
+        const tri = { p0: p0.toArray(), p1: p1.toArray(), p2: p2.toArray() };
+        segmentCount = simplifyPaintBoundaryNetwork(segments, tri, tolerance).length;
+      }
+      weightedSegments += segmentCount * sampleWeight * rasterInfo.boundaryScale;
+      analyzableTriangles += sampleWeight;
+      if (rasterInfo.approximate) approximateTriangles += sampleWeight;
+      if (material?.alphaMap || colorAttribute) uncertainTriangles += sampleWeight;
+    }
+  }
+
+  // Unmodeled vertex-color/independent-alpha variation gets a conservative
+  // single-boundary allowance per affected face. The UI identifies this as a
+  // lower-confidence estimate. The recommendation guides automatic mode; an
+  // explicit override may intentionally exceed it.
+  const estimatedBoundarySegments = Math.ceil(weightedSegments + uncertainTriangles);
+  const projectedTriangles = projectPaintOutputTriangles(sourceTriangles, estimatedBoundarySegments);
+  const utilization = projectedTriangles / maxOutputTriangles;
+  const confidence = analyzableTriangles >= sourceTriangles * 0.95 &&
+    uncertainTriangles === 0 && approximateTriangles === 0
+    ? 'high'
+    : (analyzableTriangles > 0 ? 'medium' : 'low');
+  return {
+    sourceTriangles,
+    sampledTriangles,
+    estimatedBoundarySegments,
+    projectedTriangles,
+    headroom: maxOutputTriangles - projectedTriangles,
+    utilization,
+    maxOutputTriangles,
+    confidence,
+    status: utilization >= 1 ? 'over' : (utilization >= 0.8 ? 'warning' : 'ok'),
+  };
 }
 
 function polygonArea2D(points) {
@@ -4059,8 +4548,15 @@ export async function exportMultiColor3MF(
   customPalette = null,
   despeckleSize = 0,
   smoothLevel = 0,
-  paintResolutionMm = 0
+  paintResolutionMm = 0,
+  paintOptions = {}
 ) {
+  const refinePaintBoundaries = paintOptions?.refineBoundaries !== false;
+  const overridePaintBudget = refinePaintBoundaries && paintOptions?.overrideBudget === true;
+  const requestedAutomaticBudget = Number(paintOptions?.automaticTriangleBudget);
+  const automaticTriangleBudget = Number.isFinite(requestedAutomaticBudget) && requestedAutomaticBudget > 0
+    ? Math.floor(requestedAutomaticBudget)
+    : RECOMMENDED_PAINT_OUTPUT_TRIANGLES;
   rootObject.updateWorldMatrix(true, true);
   const renderTriangles = [];
   const rootBox = new THREE.Box3();
@@ -4474,13 +4970,16 @@ export async function exportMultiColor3MF(
     degenerateUvTriangles: 0,
     exactFallbackFaces: 0,
     faceSamplingFallbacks: 0,
+    ignoreResourceLimits: overridePaintBudget,
   };
   const sharedEdgeSplits = new Map();
   const vertexColoredTriangleCount = initialTriangles.reduce(
     (count, triangle) => count + (triangle.vertexColors ? 1 : 0), 0
   );
   const vertexTraceDivisions = vertexColoredTriangleCount > 0
-    ? Math.max(2, Math.min(32, Math.floor(Math.sqrt(500000 / vertexColoredTriangleCount))))
+    ? (overridePaintBudget
+      ? 32
+      : Math.max(2, Math.min(32, Math.floor(Math.sqrt(500000 / vertexColoredTriangleCount)))))
     : 0;
 
   function registerSharedEdgeSplit(pA, pB, t) {
@@ -4504,12 +5003,17 @@ export async function exportMultiColor3MF(
     if (Math.abs(x) <= epsilon) registerSharedEdgeSplit(tri.p2, tri.p0, 1 - y);
   }
 
-  // A nearly million-triangle source already provides a much finer paint grid
-  // than a typical sliced print can reproduce. Exact texel-contour splitting
-  // would necessarily exceed the output safety limit, so use those existing
-  // faces as the paint cells instead. This is also the safe retry path for a
-  // pathological raster whose contour graph exceeds the tracing guards.
-  let denseMeshPaintFallback = shouldUseDenseMeshPaintFallback(initialTriangles.length);
+  // Automatic refinement uses the recommendation as a guardrail. Explicit
+  // existing-triangle mode skips tracing, while an override removes every
+  // application-imposed resource budget and either succeeds or reports an
+  // error without silently changing the requested result.
+  let denseMeshPaintFallback = !refinePaintBoundaries || (
+    !overridePaintBudget && shouldUseDenseMeshPaintFallback(
+      initialTriangles.length,
+      automaticTriangleBudget
+    )
+  );
+  let projectedBoundarySegments = 0;
   const tracePaintBoundaries = () => {
     for (const tri of initialTriangles) {
       const exactSegments = traceTextureBoundarySegments(tri, traceStats);
@@ -4523,6 +5027,14 @@ export async function exportMultiColor3MF(
       } else {
         tri.paintBoundarySegments = simplifiedSegments;
       }
+      projectedBoundarySegments += tri.paintBoundarySegments.length;
+      if (!overridePaintBudget && shouldUseDenseMeshPaintFallback(
+        initialTriangles.length,
+        automaticTriangleBudget,
+        projectedBoundarySegments
+      )) {
+        throw new Error('Projected paint mesh exceeds the recommended automatic paint budget.');
+      }
       for (const segment of tri.paintBoundarySegments) {
         registerBoundaryPoint(tri, segment[0]);
         registerBoundaryPoint(tri, segment[1]);
@@ -4533,7 +5045,10 @@ export async function exportMultiColor3MF(
     try {
       tracePaintBoundaries();
     } catch (error) {
-      if (!/too complex to trace safely|too many texels to trace safely/i.test(error?.message || '')) {
+      if (overridePaintBudget) {
+        throw new Error(`Refined paint export could not be completed: ${error?.message || 'boundary tracing failed'}. Turn off Refine Color Boundaries and try again.`);
+      }
+      if (!/too complex to trace safely|too many texels to trace safely|automatic paint budget/i.test(error?.message || '')) {
         throw error;
       }
       denseMeshPaintFallback = true;
@@ -4625,6 +5140,9 @@ export async function exportMultiColor3MF(
       coveredArea = 0.5;
     }
     if (Math.abs(coveredArea - 0.5) > 1e-7) {
+      if (overridePaintBudget) {
+        throw new Error('Refined paint export could not triangulate a color boundary without gaps. Turn off Refine Color Boundaries and try again.');
+      }
       // Keep the source face rather than failing the whole export. Boundary
       // edge splits are retained so adjacent faces remain conforming, while
       // paint within this numerically pathological face is sampled per region.
@@ -4655,8 +5173,8 @@ export async function exportMultiColor3MF(
         chosenColor: paint.color,
         alpha: paint.alpha,
       });
-      if (currentTriangles.length > MAX_PAINT_OUTPUT_TRIANGLES) {
-        throw new Error('Traced paint mesh exceeds the 1,000,000-triangle safety limit. Increase Boundary Accuracy or despeckle the texture.');
+      if (!denseMeshPaintFallback && !overridePaintBudget && currentTriangles.length > automaticTriangleBudget) {
+        throw new Error(`Traced paint mesh exceeds the ${automaticTriangleBudget.toLocaleString()}-triangle automatic paint budget. Turn off Refine Color Boundaries or enable its override.`);
       }
     }
   }
@@ -4721,6 +5239,13 @@ export async function exportMultiColor3MF(
     exactFallbackFaces: traceStats.exactFallbackFaces,
     faceSamplingFallbacks: traceStats.faceSamplingFallbacks,
     denseMeshPaintFallback,
+    requestedBoundaryRefinement: refinePaintBoundaries,
+    paintBudgetOverride: overridePaintBudget,
+    paintMode: denseMeshPaintFallback ? 'existing-triangles' : 'refined-boundaries',
+    projectedTriangleCount: projectPaintOutputTriangles(
+      initialTriangles.length,
+      projectedBoundarySegments
+    ),
     triangleCount: emittedTriangleCount,
   };
 

@@ -5,14 +5,18 @@ import { strFromU8, unzipSync } from 'fflate';
 import {
   applyLiveColorQuantization,
   applyLiveColorQuantizationAsync,
+  applyLiveMeshSimplification,
   applyUvFlip,
   analyzeModelColorSources,
   analyzeMeshHealth,
   exportMultiColor3MF,
   exportProcessedGlb,
+  estimatePaintOutputBudget,
   extractGlbImages,
+  meshSimplificationErrorForLod,
   planTextureWorkingSizes,
   processTextureLabels,
+  projectPaintOutputTriangles,
   quantizePaletteFromSamples,
   repairBufferGeometry,
   sampleModelSurfaceColors,
@@ -98,10 +102,123 @@ test('mesh diagnostics match full repair topology statistics', () => {
   }
 });
 
-test('dense source meshes use existing triangles as safe 3MF paint cells', () => {
-  assert.equal(shouldUseDenseMeshPaintFallback(918038), true);
-  assert.equal(shouldUseDenseMeshPaintFallback(749999), false);
-  assert.equal(shouldUseDenseMeshPaintFallback(750000), true);
+test('paint fallback responds to projected contour cost rather than a fixed source threshold', () => {
+  assert.equal(shouldUseDenseMeshPaintFallback(918038), false);
+  assert.equal(shouldUseDenseMeshPaintFallback(999999), false);
+  assert.equal(shouldUseDenseMeshPaintFallback(1000000), true);
+  assert.equal(shouldUseDenseMeshPaintFallback(350000, 1000000, 250000), false);
+  assert.equal(shouldUseDenseMeshPaintFallback(350000, 1000000, 350000), true);
+  assert.equal(projectPaintOutputTriangles(350000, 100), 350215);
+});
+
+test('mesh simplification LOD is an error limit, not a triangle target', () => {
+  const coarse = meshSimplificationErrorForLod(0);
+  const balanced = meshSimplificationErrorForLod(65);
+  const fine = meshSimplificationErrorForLod(100);
+  assert.ok(fine > 0);
+  assert.ok(fine < balanced);
+  assert.ok(balanced < coarse);
+  assert.equal(meshSimplificationErrorForLod(-50), coarse);
+  assert.equal(meshSimplificationErrorForLod(500), fine);
+});
+
+test('mesh simplification preserves material groups, UV channels, and vertex alpha', async () => {
+  const geometry = new THREE.PlaneGeometry(2, 2, 32, 32);
+  geometry.setAttribute('uv1', geometry.getAttribute('uv').clone());
+  const colors = new Float32Array(geometry.attributes.position.count * 4);
+  for (let vertex = 0; vertex < geometry.attributes.position.count; vertex++) {
+    colors.set([1, vertex % 2, 0.25, (vertex % 7) / 6], vertex * 4);
+  }
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4));
+  const halfway = Math.floor(geometry.index.count / 6) * 3;
+  geometry.clearGroups();
+  geometry.addGroup(0, halfway, 0);
+  geometry.addGroup(halfway, geometry.index.count - halfway, 1);
+  const root = new THREE.Group();
+  const mesh = new THREE.Mesh(geometry, [
+    new THREE.MeshBasicMaterial({ vertexColors: true }),
+    new THREE.MeshBasicMaterial({ vertexColors: true }),
+  ]);
+  root.add(mesh);
+  const originalTriangles = geometry.index.count / 3;
+
+  const result = await applyLiveMeshSimplification(root, { lod: 100 });
+
+  assert.ok(result.removedTriangles > 0);
+  assert.ok(mesh.geometry.index.count / 3 < originalTriangles);
+  assert.deepEqual(Object.keys(mesh.geometry.attributes).sort(), ['color', 'normal', 'position', 'uv', 'uv1']);
+  assert.equal(mesh.geometry.attributes.color.itemSize, 4);
+  assert.equal(mesh.geometry.groups.length, 2);
+  assert.deepEqual(mesh.geometry.groups.map(group => group.materialIndex), [0, 1]);
+  assert.equal(
+    mesh.geometry.groups.reduce((sum, group) => sum + group.count, 0),
+    mesh.geometry.index.count
+  );
+  for (let vertex = 0; vertex < mesh.geometry.attributes.uv.count; vertex++) {
+    assert.equal(mesh.geometry.attributes.uv.getX(vertex), mesh.geometry.attributes.uv1.getX(vertex));
+    assert.equal(mesh.geometry.attributes.uv.getY(vertex), mesh.geometry.attributes.uv1.getY(vertex));
+    const alpha = mesh.geometry.attributes.color.getW(vertex);
+    assert.ok([...Array(7)].some((_, value) => Math.abs(alpha - value / 6) < 1e-6));
+  }
+  assert.ok(Math.abs(mesh.geometry.boundingBox.min.x + 1) < 1e-6);
+  assert.ok(Math.abs(mesh.geometry.boundingBox.max.x - 1) < 1e-6);
+});
+
+test('mesh simplification leaves animated geometry unchanged', async () => {
+  const geometry = new THREE.SphereGeometry(1, 16, 8);
+  geometry.morphAttributes.position = [geometry.attributes.position.clone()];
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(geometry, new THREE.MeshBasicMaterial()));
+  const originalTriangles = geometry.index.count / 3;
+  const result = await applyLiveMeshSimplification(root, { lod: 100 });
+  assert.equal(result.removedTriangles, 0);
+  assert.equal(result.skippedMeshes, 1);
+  assert.equal(root.children[0].geometry.index.count / 3, originalTriangles);
+});
+
+test('adaptive paint preflight measures processed texture boundaries', () => {
+  const root = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial();
+  material.map = new THREE.Texture();
+  material._originalMap = material.map;
+  material._quantizationEnabled = true;
+  material._quantizedLabelsWidth = 8;
+  material._quantizedLabelsHeight = 8;
+  material._quantizedLabels = new Uint8Array(64);
+  for (let y = 0; y < 8; y++) {
+    for (let x = 0; x < 8; x++) material._quantizedLabels[y * 8 + x] = (x + y) % 2;
+  }
+  root.add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material));
+
+  const estimate = estimatePaintOutputBudget(root, { maxSamples: 32 });
+
+  assert.equal(estimate.sourceTriangles, 2);
+  assert.ok(estimate.estimatedBoundarySegments > 0);
+  assert.ok(estimate.projectedTriangles > estimate.sourceTriangles);
+  assert.equal(estimate.confidence, 'high');
+});
+
+test('adaptive paint preflight does not alias away periodic high-resolution detail', () => {
+  const size = 1024;
+  const labels = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) labels[y * size + x] = (x + y) % 2;
+  }
+  const material = new THREE.MeshBasicMaterial();
+  material.map = new THREE.Texture();
+  material._originalMap = material.map;
+  material._quantizationEnabled = true;
+  material._quantizedLabelsWidth = size;
+  material._quantizedLabelsHeight = size;
+  material._quantizedLabels = labels;
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material));
+
+  const estimate = estimatePaintOutputBudget(root, { maxSamples: 2 });
+
+  assert.ok(estimate.estimatedBoundarySegments > 1000);
+  assert.equal(estimate.status, 'over');
+  assert.equal(estimate.confidence, 'medium');
 });
 
 test('coverage-aware palette preserves a supported chromatic accent among neutral shades', () => {
@@ -429,9 +546,9 @@ function assertNoUnmatchedSquareInteriorEdges(modelXml) {
   }
 }
 
-async function exportedModelXml(root, toleranceMm, targetSizeMm = 10) {
+async function exportedModelXml(root, toleranceMm, targetSizeMm = 10, paintOptions = {}) {
   const archive = await exportMultiColor3MF(
-    root, 2, true, targetSizeMm, false, root._quantizedPalette, 0, 0, toleranceMm
+    root, 2, true, targetSizeMm, false, root._quantizedPalette, 0, 0, toleranceMm, paintOptions
   );
   return strFromU8(unzipSync(new Uint8Array(archive))['3D/3dmodel.model']);
 }
@@ -707,6 +824,41 @@ test('3MF paint export traces an enclosed texture feature without probe sampling
   }
   assert.equal(root._lastPaintBake.boundaryToleranceMm, 0);
   assert.ok(root._lastPaintBake.tracedBoundarySegments > 0);
+});
+
+test('3MF existing-triangle paint mode does not create contour geometry', async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([
+    0, 1,
+    1, 0,
+  ]), 2, 2);
+  const modelXml = await exportedModelXml(root, 0, 10, { refineBoundaries: false });
+  assert.equal(inspectPaintMesh(modelXml).triangles.length, 2);
+  assert.equal(root._lastPaintBake.paintMode, 'existing-triangles');
+  assert.equal(root._lastPaintBake.requestedBoundaryRefinement, false);
+  assert.equal(root._lastPaintBake.tracedBoundarySegments, 0);
+});
+
+test('3MF paint override bypasses the automatic recommendation without falling back', async () => {
+  const labels = new Uint8Array([
+    0, 1,
+    1, 0,
+  ]);
+  const automaticRoot = createQuantizedSquareRoot(labels, 2, 2);
+  const automaticXml = await exportedModelXml(automaticRoot, 0, 10, {
+    automaticTriangleBudget: 1,
+  });
+  assert.equal(inspectPaintMesh(automaticXml).triangles.length, 2);
+  assert.equal(automaticRoot._lastPaintBake.paintMode, 'existing-triangles');
+
+  const overrideRoot = createQuantizedSquareRoot(labels, 2, 2);
+  const overrideXml = await exportedModelXml(overrideRoot, 0, 10, {
+    automaticTriangleBudget: 1,
+    overrideBudget: true,
+  });
+  assert.ok(inspectPaintMesh(overrideXml).triangles.length > 2);
+  assert.equal(overrideRoot._lastPaintBake.paintMode, 'refined-boundaries');
+  assert.equal(overrideRoot._lastPaintBake.paintBudgetOverride, true);
+  assert.equal(overrideRoot._lastPaintBake.faceSamplingFallbacks, 0);
 });
 
 test('3MF boundary accuracy simplifies stair-stepped contours', async () => {
