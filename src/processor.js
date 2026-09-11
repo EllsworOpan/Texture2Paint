@@ -2101,6 +2101,517 @@ function getPrusaMmuHex(extruderId) {
   return (extruderId - 3).toString(16).toUpperCase() + 'C';
 }
 
+const PAINT_TRACE_EPSILON = 1e-9;
+const MAX_PAINT_BOUNDARY_SCAN_STEPS = 100000000;
+const MAX_PAINT_BOUNDARY_SEGMENTS = 2000000;
+
+function positiveModulo(value, modulus) {
+  return ((value % modulus) + modulus) % modulus;
+}
+
+function localPaintPointToPosition(tri, point) {
+  const w1 = point[0];
+  const w2 = point[1];
+  const w0 = 1 - w1 - w2;
+  return [
+    w0 * tri.p0[0] + w1 * tri.p1[0] + w2 * tri.p2[0],
+    w0 * tri.p0[1] + w1 * tri.p1[1] + w2 * tri.p2[1],
+    w0 * tri.p0[2] + w1 * tri.p1[2] + w2 * tri.p2[2],
+  ];
+}
+
+function localPaintPointToUv(tri, point) {
+  const w1 = point[0];
+  const w2 = point[1];
+  const w0 = 1 - w1 - w2;
+  return [
+    w0 * tri.u0 + w1 * tri.u1 + w2 * tri.u2,
+    w0 * tri.v0 + w1 * tri.v1 + w2 * tri.v2,
+  ];
+}
+
+function clipLocalSegmentToTriangle(a, b) {
+  let start = 0;
+  let end = 1;
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const constraints = [
+    [a[0], dx],
+    [a[1], dy],
+    [1 - a[0] - a[1], -dx - dy],
+  ];
+
+  for (const [base, delta] of constraints) {
+    if (Math.abs(delta) <= PAINT_TRACE_EPSILON) {
+      if (base < -PAINT_TRACE_EPSILON) return null;
+      continue;
+    }
+    const crossing = -base / delta;
+    if (delta > 0) start = Math.max(start, crossing);
+    else end = Math.min(end, crossing);
+    if (start > end + PAINT_TRACE_EPSILON) return null;
+  }
+
+  const p0 = [a[0] + dx * start, a[1] + dy * start];
+  const p1 = [a[0] + dx * end, a[1] + dy * end];
+  if ((p0[0] - p1[0]) ** 2 + (p0[1] - p1[1]) ** 2 <= PAINT_TRACE_EPSILON ** 2) return null;
+  return [p0, p1];
+}
+
+function textureTriangleSliceRange(points, axis, value) {
+  const other = axis === 0 ? 1 : 0;
+  const hits = [];
+  for (let edge = 0; edge < 3; edge++) {
+    const a = points[edge];
+    const b = points[(edge + 1) % 3];
+    const da = a[axis] - value;
+    const db = b[axis] - value;
+    if (Math.abs(da) <= PAINT_TRACE_EPSILON) hits.push(a[other]);
+    if (Math.abs(db) <= PAINT_TRACE_EPSILON) hits.push(b[other]);
+    const span = b[axis] - a[axis];
+    if (Math.abs(span) > PAINT_TRACE_EPSILON) {
+      const t = (value - a[axis]) / span;
+      if (t > PAINT_TRACE_EPSILON && t < 1 - PAINT_TRACE_EPSILON) {
+        hits.push(a[other] + (b[other] - a[other]) * t);
+      }
+    }
+  }
+  if (hits.length === 0) return null;
+  return [Math.min(...hits), Math.max(...hits)];
+}
+
+function rasterCellState(raster, cellX, cellY) {
+  const px = positiveModulo(cellX, raster.width);
+  const textureRow = positiveModulo(cellY, raster.height);
+  const py = raster.flipY ? raster.height - 1 - textureRow : textureRow;
+  const pixelIndex = py * raster.width + px;
+  const alpha = raster.rgba ? raster.rgba[pixelIndex * 4 + 3] : 255;
+  return alpha < 128 ? -1 : raster.labels[pixelIndex];
+}
+
+function getRasterBoundaryIndex(raster, traceStats) {
+  if (raster.boundaryIndex) return raster.boundaryIndex;
+  const vertical = Array.from({ length: raster.width }, () => []);
+  const horizontal = Array.from({ length: raster.height }, () => []);
+  const comparisons = raster.width * raster.height * 2;
+  traceStats.scanSteps += comparisons;
+  if (traceStats.scanSteps > MAX_PAINT_BOUNDARY_SCAN_STEPS) {
+    throw new Error('Working textures contain too many texels to trace safely. Reduce the working texture resolution.');
+  }
+
+  for (let gridX = 0; gridX < raster.width; gridX++) {
+    const column = vertical[gridX];
+    for (let cellY = 0; cellY < raster.height; cellY++) {
+      if (rasterCellState(raster, gridX - 1, cellY) !== rasterCellState(raster, gridX, cellY)) {
+        column.push(cellY);
+      }
+    }
+  }
+  for (let gridY = 0; gridY < raster.height; gridY++) {
+    const row = horizontal[gridY];
+    for (let cellX = 0; cellX < raster.width; cellX++) {
+      if (rasterCellState(raster, cellX, gridY - 1) !== rasterCellState(raster, cellX, gridY)) {
+        row.push(cellX);
+      }
+    }
+  }
+  raster.boundaryIndex = { vertical, horizontal };
+  return raster.boundaryIndex;
+}
+
+function traceTextureBoundarySegments(tri, traceStats) {
+  const raster = tri.raster;
+  if (!raster || Math.abs(raster.repeatX) <= PAINT_TRACE_EPSILON ||
+    Math.abs(raster.repeatY) <= PAINT_TRACE_EPSILON) return [];
+
+  const texturePoints = [
+    [tri.u0 * raster.repeatX + raster.offsetX, tri.v0 * raster.repeatY + raster.offsetY],
+    [tri.u1 * raster.repeatX + raster.offsetX, tri.v1 * raster.repeatY + raster.offsetY],
+    [tri.u2 * raster.repeatX + raster.offsetX, tri.v2 * raster.repeatY + raster.offsetY],
+  ];
+  const e1x = texturePoints[1][0] - texturePoints[0][0];
+  const e1y = texturePoints[1][1] - texturePoints[0][1];
+  const e2x = texturePoints[2][0] - texturePoints[0][0];
+  const e2y = texturePoints[2][1] - texturePoints[0][1];
+  const determinant = e1x * e2y - e1y * e2x;
+  if (Math.abs(determinant) <= PAINT_TRACE_EPSILON) return [];
+
+  const toLocal = point => {
+    const dx = point[0] - texturePoints[0][0];
+    const dy = point[1] - texturePoints[0][1];
+    return [
+      (dx * e2y - dy * e2x) / determinant,
+      (e1x * dy - e1y * dx) / determinant,
+    ];
+  };
+  const segments = [];
+  const appendSegment = (a, b) => {
+    const clipped = clipLocalSegmentToTriangle(toLocal(a), toLocal(b));
+    if (!clipped) return;
+    segments.push(clipped);
+    traceStats.boundarySegments++;
+    if (traceStats.boundarySegments > MAX_PAINT_BOUNDARY_SEGMENTS) {
+      throw new Error('Texture boundary is too complex to trace safely. Despeckle the texture or use a lower working texture resolution.');
+    }
+  };
+
+  const minU = Math.min(...texturePoints.map(point => point[0]));
+  const maxU = Math.max(...texturePoints.map(point => point[0]));
+  const minV = Math.min(...texturePoints.map(point => point[1]));
+  const maxV = Math.max(...texturePoints.map(point => point[1]));
+  const minGridX = Math.ceil(minU * raster.width - PAINT_TRACE_EPSILON);
+  const maxGridX = Math.floor(maxU * raster.width + PAINT_TRACE_EPSILON);
+  const minGridY = Math.ceil(minV * raster.height - PAINT_TRACE_EPSILON);
+  const maxGridY = Math.floor(maxV * raster.height + PAINT_TRACE_EPSILON);
+  const boundaryIndex = getRasterBoundaryIndex(raster, traceStats);
+
+  for (let gridX = minGridX; gridX <= maxGridX; gridX++) {
+    const u = gridX / raster.width;
+    const range = textureTriangleSliceRange(texturePoints, 0, u);
+    if (!range) continue;
+    const firstCellY = Math.floor(range[0] * raster.height);
+    const lastCellY = Math.ceil(range[1] * raster.height) - 1;
+    const baseCells = boundaryIndex.vertical[positiveModulo(gridX, raster.width)];
+    for (const baseCellY of baseCells) {
+      const firstTile = Math.ceil((firstCellY - baseCellY) / raster.height);
+      const lastTile = Math.floor((lastCellY - baseCellY) / raster.height);
+      for (let tile = firstTile; tile <= lastTile; tile++) {
+        const cellY = baseCellY + tile * raster.height;
+        appendSegment([u, cellY / raster.height], [u, (cellY + 1) / raster.height]);
+      }
+    }
+  }
+
+  for (let gridY = minGridY; gridY <= maxGridY; gridY++) {
+    const v = gridY / raster.height;
+    const range = textureTriangleSliceRange(texturePoints, 1, v);
+    if (!range) continue;
+    const firstCellX = Math.floor(range[0] * raster.width);
+    const lastCellX = Math.ceil(range[1] * raster.width) - 1;
+    const baseCells = boundaryIndex.horizontal[positiveModulo(gridY, raster.height)];
+    for (const baseCellX of baseCells) {
+      const firstTile = Math.ceil((firstCellX - baseCellX) / raster.width);
+      const lastTile = Math.floor((lastCellX - baseCellX) / raster.width);
+      for (let tile = firstTile; tile <= lastTile; tile++) {
+        const cellX = baseCellX + tile * raster.width;
+        appendSegment([cellX / raster.width, v], [(cellX + 1) / raster.width, v]);
+      }
+    }
+  }
+
+  return segments;
+}
+
+function pointSegmentDistanceSq3D(point, a, b) {
+  const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const ap = [point[0] - a[0], point[1] - a[1], point[2] - a[2]];
+  const lengthSq = ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2;
+  const t = lengthSq > 0
+    ? Math.max(0, Math.min(1, (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / lengthSq))
+    : 0;
+  return (point[0] - a[0] - ab[0] * t) ** 2 +
+    (point[1] - a[1] - ab[1] * t) ** 2 +
+    (point[2] - a[2] - ab[2] * t) ** 2;
+}
+
+function simplifyOpenPaintChain(points, tri, toleranceMm) {
+  if (points.length <= 2) return points.slice();
+  const positions = points.map(point => localPaintPointToPosition(tri, point));
+  const keep = new Uint8Array(points.length);
+  keep[0] = 1;
+  keep[points.length - 1] = 1;
+  const stack = [[0, points.length - 1]];
+  const toleranceSq = toleranceMm * toleranceMm;
+  while (stack.length) {
+    const [start, end] = stack.pop();
+    let farthest = -1;
+    let farthestDistanceSq = toleranceSq;
+    for (let i = start + 1; i < end; i++) {
+      const distanceSq = pointSegmentDistanceSq3D(positions[i], positions[start], positions[end]);
+      if (distanceSq > farthestDistanceSq + 1e-18) {
+        farthestDistanceSq = distanceSq;
+        farthest = i;
+      }
+    }
+    if (farthest >= 0) {
+      keep[farthest] = 1;
+      stack.push([start, farthest], [farthest, end]);
+    }
+  }
+  return points.filter((_, index) => keep[index]);
+}
+
+function simplifyClosedPaintChain(points, tri, toleranceMm) {
+  if (points.length <= 3) return points.slice();
+  const positions = points.map(point => localPaintPointToPosition(tri, point));
+  let anchorB = 1;
+  let farthestDistanceSq = -1;
+  for (let i = 1; i < positions.length; i++) {
+    const distanceSq = (positions[i][0] - positions[0][0]) ** 2 +
+      (positions[i][1] - positions[0][1]) ** 2 +
+      (positions[i][2] - positions[0][2]) ** 2;
+    if (distanceSq > farthestDistanceSq) {
+      farthestDistanceSq = distanceSq;
+      anchorB = i;
+    }
+  }
+  const firstHalf = simplifyOpenPaintChain(points.slice(0, anchorB + 1), tri, toleranceMm);
+  const secondHalf = simplifyOpenPaintChain(
+    points.slice(anchorB).concat([points[0]]), tri, toleranceMm
+  );
+  const result = firstHalf.slice(0, -1).concat(secondHalf.slice(0, -1));
+  if (result.length >= 3) return result;
+  return [points[0], points[Math.floor(points.length / 3)], points[Math.floor(points.length * 2 / 3)]];
+}
+
+function simplifyPaintBoundaryNetwork(segments, tri, toleranceMm) {
+  if (segments.length === 0) return [];
+  const nodes = new Map();
+  const edges = new Set();
+  const keyFor = point => `${Math.round(point[0] * 1e9)}_${Math.round(point[1] * 1e9)}`;
+  const addNode = point => {
+    const key = keyFor(point);
+    if (!nodes.has(key)) nodes.set(key, { point, neighbors: new Set() });
+    return key;
+  };
+  for (const [a, b] of segments) {
+    const ka = addNode(a);
+    const kb = addNode(b);
+    if (ka === kb) continue;
+    const edgeKey = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+    if (edges.has(edgeKey)) continue;
+    edges.add(edgeKey);
+    nodes.get(ka).neighbors.add(kb);
+    nodes.get(kb).neighbors.add(ka);
+  }
+
+  const usedEdges = new Set();
+  const edgeKeyFor = (a, b) => a < b ? `${a}|${b}` : `${b}|${a}`;
+  const walk = (start, next) => {
+    const path = [start];
+    let previous = start;
+    let current = next;
+    while (true) {
+      usedEdges.add(edgeKeyFor(previous, current));
+      path.push(current);
+      if (current === start || nodes.get(current).neighbors.size !== 2) break;
+      const candidates = [...nodes.get(current).neighbors].filter(candidate => candidate !== previous);
+      if (candidates.length !== 1 || usedEdges.has(edgeKeyFor(current, candidates[0]))) break;
+      previous = current;
+      current = candidates[0];
+    }
+    return path;
+  };
+
+  const chains = [];
+  for (const [key, node] of nodes) {
+    if (node.neighbors.size === 2) continue;
+    for (const neighbor of node.neighbors) {
+      if (!usedEdges.has(edgeKeyFor(key, neighbor))) chains.push(walk(key, neighbor));
+    }
+  }
+  for (const edgeKey of edges) {
+    if (usedEdges.has(edgeKey)) continue;
+    const separator = edgeKey.indexOf('|');
+    chains.push(walk(edgeKey.slice(0, separator), edgeKey.slice(separator + 1)));
+  }
+
+  const simplified = [];
+  for (const chain of chains) {
+    const closed = chain.length > 2 && chain[0] === chain[chain.length - 1];
+    const chainPoints = (closed ? chain.slice(0, -1) : chain).map(key => nodes.get(key).point);
+    const result = closed
+      ? simplifyClosedPaintChain(chainPoints, tri, toleranceMm)
+      : simplifyOpenPaintChain(chainPoints, tri, toleranceMm);
+    const edgeCount = closed ? result.length : result.length - 1;
+    for (let i = 0; i < edgeCount; i++) {
+      simplified.push([result[i], result[(i + 1) % result.length]]);
+    }
+  }
+  return simplified;
+}
+
+function polygonArea2D(points) {
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    area += a[0] * b[1] - b[0] * a[1];
+  }
+  return area * 0.5;
+}
+
+function pointInPaintPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i];
+    const b = polygon[j];
+    if (((a[1] > point[1]) !== (b[1] > point[1])) &&
+      point[0] < (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0]) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function interiorPaintPolygonPoint(polygon) {
+  const vectors = polygon.map(point => new THREE.Vector2(point[0], point[1]));
+  const faces = THREE.ShapeUtils.triangulateShape(vectors, []);
+  if (faces.length) {
+    const [a, b, c] = faces[0];
+    return [
+      (polygon[a][0] + polygon[b][0] + polygon[c][0]) / 3,
+      (polygon[a][1] + polygon[b][1] + polygon[c][1]) / 3,
+    ];
+  }
+  return polygon[0];
+}
+
+function restorePaintBoundaryVertices(points, triangles, boundaryLoops) {
+  const referenced = new Set(triangles.flat());
+  for (const loop of boundaryLoops) {
+    for (const pointIndex of loop) {
+      if (referenced.has(pointIndex)) continue;
+      const point = points[pointIndex];
+      let inserted = false;
+      for (let triangleIndex = 0; triangleIndex < triangles.length && !inserted; triangleIndex++) {
+        const triangle = triangles[triangleIndex];
+        for (let edge = 0; edge < 3; edge++) {
+          const aIndex = triangle[edge];
+          const bIndex = triangle[(edge + 1) % 3];
+          const a = points[aIndex];
+          const b = points[bIndex];
+          const cross = Math.abs((point[0] - a[0]) * (b[1] - a[1]) - (point[1] - a[1]) * (b[0] - a[0]));
+          const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+          const dot = (point[0] - a[0]) * (point[0] - b[0]) + (point[1] - a[1]) * (point[1] - b[1]);
+          if (cross > 1e-8 * Math.max(1, length) || dot >= -1e-12) continue;
+          const opposite = triangle[(edge + 2) % 3];
+          triangles[triangleIndex] = [aIndex, pointIndex, opposite];
+          triangles.push([pointIndex, bIndex, opposite]);
+          referenced.add(pointIndex);
+          inserted = true;
+          break;
+        }
+      }
+    }
+  }
+  return triangles;
+}
+
+function triangulatePaintGraph(textureSegments, boundaryPoints) {
+  const nodes = [];
+  const nodeByKey = new Map();
+  const adjacency = [];
+  const undirectedEdges = new Set();
+  const keyFor = point => `${Math.round(point[0] * 1e9)}_${Math.round(point[1] * 1e9)}`;
+  const addNode = point => {
+    const key = keyFor(point);
+    if (nodeByKey.has(key)) return nodeByKey.get(key);
+    const index = nodes.length;
+    nodeByKey.set(key, index);
+    nodes.push(point);
+    adjacency.push(new Set());
+    return index;
+  };
+  const addEdge = (a, b) => {
+    const ia = addNode(a);
+    const ib = addNode(b);
+    if (ia === ib) return;
+    const key = ia < ib ? `${ia}|${ib}` : `${ib}|${ia}`;
+    if (undirectedEdges.has(key)) return;
+    undirectedEdges.add(key);
+    adjacency[ia].add(ib);
+    adjacency[ib].add(ia);
+  };
+  for (const segment of textureSegments) addEdge(segment[0], segment[1]);
+  for (const edgePoints of boundaryPoints) {
+    for (let i = 0; i + 1 < edgePoints.length; i++) addEdge(edgePoints[i], edgePoints[i + 1]);
+  }
+
+  const orderedNeighbors = adjacency.map((neighbors, index) =>
+    [...neighbors].sort((a, b) =>
+      Math.atan2(nodes[a][1] - nodes[index][1], nodes[a][0] - nodes[index][0]) -
+      Math.atan2(nodes[b][1] - nodes[index][1], nodes[b][0] - nodes[index][0])
+    )
+  );
+  const visitedDirections = new Set();
+  const cycles = [];
+  for (let start = 0; start < nodes.length; start++) {
+    for (const first of orderedNeighbors[start]) {
+      const initialKey = `${start}>${first}`;
+      if (visitedDirections.has(initialKey)) continue;
+      const cycle = [];
+      let previous = start;
+      let current = first;
+      let valid = true;
+      for (let steps = 0; steps <= undirectedEdges.size * 2 + 1; steps++) {
+        const directionKey = `${previous}>${current}`;
+        if (visitedDirections.has(directionKey)) {
+          valid = previous === start && current === first;
+          break;
+        }
+        visitedDirections.add(directionKey);
+        cycle.push(previous);
+        const neighbors = orderedNeighbors[current];
+        const reverseIndex = neighbors.indexOf(previous);
+        if (reverseIndex < 0 || neighbors.length === 0) {
+          valid = false;
+          break;
+        }
+        const next = neighbors[(reverseIndex - 1 + neighbors.length) % neighbors.length];
+        previous = current;
+        current = next;
+        if (previous === start && current === first) break;
+      }
+      if (!valid || cycle.length < 3) continue;
+      const uniqueCycle = cycle.filter((value, index) => index === 0 || value !== cycle[index - 1]);
+      const points = uniqueCycle.map(index => nodes[index]);
+      const area = polygonArea2D(points);
+      if (Math.abs(area) > 1e-12) cycles.push({ indices: uniqueCycle, points, area });
+    }
+  }
+
+  const shells = cycles.filter(cycle => cycle.area > 0).map(cycle => ({ ...cycle, holes: [] }));
+  const holes = cycles.filter(cycle => cycle.area < 0);
+  for (const hole of holes) {
+    const interior = interiorPaintPolygonPoint(hole.points.slice().reverse());
+    let owner = null;
+    for (const shell of shells) {
+      if (shell.area <= Math.abs(hole.area) + 1e-12 || !pointInPaintPolygon(interior, shell.points)) continue;
+      if (!owner || shell.area < owner.area) owner = shell;
+    }
+    if (owner) owner.holes.push(hole);
+  }
+
+  const result = [];
+  for (const shell of shells) {
+    const contour = shell.points.map(point => new THREE.Vector2(point[0], point[1]));
+    const holeVectors = shell.holes.map(hole => hole.points.map(point => new THREE.Vector2(point[0], point[1])));
+    let triangles = THREE.ShapeUtils.triangulateShape(contour, holeVectors);
+    const flattened = shell.points.concat(...shell.holes.map(hole => hole.points));
+    const boundaryLoops = [];
+    let offset = 0;
+    boundaryLoops.push(shell.points.map((_, index) => offset + index));
+    offset += shell.points.length;
+    for (const hole of shell.holes) {
+      boundaryLoops.push(hole.points.map((_, index) => offset + index));
+      offset += hole.points.length;
+    }
+    triangles = restorePaintBoundaryVertices(flattened, triangles, boundaryLoops);
+    if (triangles.length === 0) continue;
+    const sampleTriangle = triangles[0].map(index => flattened[index]);
+    const samplePoint = [
+      (sampleTriangle[0][0] + sampleTriangle[1][0] + sampleTriangle[2][0]) / 3,
+      (sampleTriangle[0][1] + sampleTriangle[1][1] + sampleTriangle[2][1]) / 3,
+    ];
+    for (const triangle of triangles) {
+      const points = triangle.map(index => flattened[index]);
+      if (Math.abs(polygonArea2D(points)) > 1e-14) result.push({ points, samplePoint });
+    }
+  }
+  return result;
+}
+
 /**
  * Exports a SINGLE WATERTIGHT SOLID 3MF file with native Prusa/Bambu multi-material paint data.
  * Merges all meshes and maps each triangle to its respective material texture/color.
@@ -2114,7 +2625,7 @@ export async function exportMultiColor3MF(
   customPalette = null,
   despeckleSize = 0,
   smoothLevel = 0,
-  paintResolutionMm = 0.25
+  paintResolutionMm = 0.10
 ) {
   rootObject.updateWorldMatrix(true, true);
 
@@ -2262,7 +2773,7 @@ export async function exportMultiColor3MF(
         if (smoothLevel > 0) labels = smoothBoundaries(labels, W, H, smoothLevel, palette.length);
       }
 
-      materialSamplers.set(m, (rawU, rawV) => {
+      const sampler = (rawU, rawV) => {
         let u = rawU * repeat.x + offset.x;
         let v = rawV * repeat.y + offset.y;
         const su = ((u % 1) + 1) % 1;
@@ -2276,7 +2787,19 @@ export async function exportMultiColor3MF(
         const color = labels[py * W + px];
         const alpha = imgData[off + 3];
         return { color, alpha };
-      });
+      };
+      sampler.raster = {
+        width: W,
+        height: H,
+        labels,
+        rgba: imgData,
+        repeatX: repeat.x,
+        repeatY: repeat.y,
+        offsetX: offset.x,
+        offsetY: offset.y,
+        flipY: map?.flipY ?? true,
+      };
+      materialSamplers.set(m, sampler);
     } else if (m.color) {
       const colIdx = getClosestColor(Math.round(m.color.r * 255), Math.round(m.color.g * 255), Math.round(m.color.b * 255));
       materialSamplers.set(m, () => ({ color: colIdx, alpha: 255 }));
@@ -2350,21 +2873,15 @@ export async function exportMultiColor3MF(
         u0, v0: v0_uv,
         u1, v1: v1_uv,
         u2, v2: v2_uv,
-        sampler
+        sampler,
+        raster: sampler.raster || null,
       });
     }
   }
 
-  // 4. ADAPTIVE CONFORMING COLOR-BOUNDARY REFINEMENT
-  // Prevents "triangle-only" coloring by subdividing along texture color & decal boundaries
-  // while guaranteeing ZERO T-junctions and 100% watertight connectivity.
-  function distSq(a, b) {
-    const dx = a[0] - b[0];
-    const dy = a[1] - b[1];
-    const dz = a[2] - b[2];
-    return dx * dx + dy * dy + dz * dz;
-  }
-
+  // 4. TRACE THE DISCRETE TEXTURE BOUNDARIES, THEN CONSTRAIN THE MESH TO THEM.
+  // Unlike probe-based midpoint subdivision, this preserves enclosed features
+  // and spends triangles on contours instead of uniformly across painted areas.
   function getPosKey(x, y, z) {
     return `${Math.round(x * 1000)}_${Math.round(y * 1000)}_${Math.round(z * 1000)}`;
   }
@@ -2374,190 +2891,123 @@ export async function exportMultiColor3MF(
     const kB = getPosKey(pB[0], pB[1], pB[2]);
     return kA < kB ? `${kA}|${kB}` : `${kB}|${kA}`;
   }
-
-  // A barycentric 4x4 coverage grid catches transitions which happen to miss
-  // an edge midpoint. Unlike the old hand-picked probes it is symmetric and
-  // is also used to select a representative paint color for the final face.
-  const BARY_WEIGHTS = [];
-  for (let row = 0; row <= 4; row++) {
-    for (let col = 0; col <= 4 - row; col++) {
-      BARY_WEIGHTS.push([row / 4, col / 4, (4 - row - col) / 4]);
-    }
-  }
-  BARY_WEIGHTS.push([1 / 3, 1 / 3, 1 / 3]);
-
-  function sampleCoverage(tri) {
-    const { u0, v0, u1, v1, u2, v2, sampler } = tri;
-    const colors = new Map();
-    let opaqueCount = 0;
-    let transparentCount = 0;
-
-    for (const [w0, w1, w2] of BARY_WEIGHTS) {
-      const s = sampler(w0 * u0 + w1 * u1 + w2 * u2, w0 * v0 + w1 * v1 + w2 * v2);
-      if (s.alpha < 128) {
-        transparentCount++;
-      } else {
-        opaqueCount++;
-        colors.set(s.color, (colors.get(s.color) || 0) + 1);
-      }
-    }
-    return { colors, opaqueCount, transparentCount };
-  }
-
-  function triangleHasVariation(tri) {
-    const coverage = sampleCoverage(tri);
-    return coverage.colors.size > 1 || (coverage.opaqueCount > 0 && coverage.transparentCount > 0);
-  }
-
-  let currentTriangles = initialTriangles;
-  // 3MF paint is per-face, so this is the physical sampling resolution of the
-  // baked paint mesh. A 0.25 mm default is below a typical 0.4 mm nozzle while
-  // keeping the file much smaller than a triangle-per-texture-pixel export.
-  const paintStepMm = Math.max(0.01, Math.min(2.0, Number(paintResolutionMm) || 0.25));
-  const MIN_SPLIT_EDGE_LEN_SQ = paintStepMm * paintStepMm;
-  let largestInitialEdge = paintStepMm;
-  for (const tri of initialTriangles) {
-    largestInitialEdge = Math.max(
-      largestInitialEdge,
-      Math.sqrt(distSq(tri.p0, tri.p1)),
-      Math.sqrt(distSq(tri.p1, tri.p2)),
-      Math.sqrt(distSq(tri.p2, tri.p0))
-    );
-  }
-  // Derive the required depth from the requested print resolution instead of
-  // silently capping every model at four midpoint splits.
-  const MAX_REFINEMENT_PASSES = Math.min(15, Math.max(1, Math.ceil(Math.log2(largestInitialEdge / paintStepMm))));
   const MAX_OUTPUT_TRIANGLES = 1000000;
-  let refinementLimited = false;
+  const numericTolerance = Number(paintResolutionMm);
+  const boundaryToleranceMm = Number.isFinite(numericTolerance)
+    ? Math.max(0, Math.min(2, numericTolerance))
+    : 0.10;
+  const traceStats = { scanSteps: 0, boundarySegments: 0 };
+  const sharedEdgeSplits = new Map();
 
-  for (let pass = 0; pass < MAX_REFINEMENT_PASSES; pass++) {
-    const splitEdges = new Set();
+  function registerSharedEdgeSplit(pA, pB, t) {
+    const keyA = getPosKey(pA[0], pA[1], pA[2]);
+    const keyB = getPosKey(pB[0], pB[1], pB[2]);
+    const edgeKey = getEdgeKey(pA, pB);
+    const canonicalT = keyA <= keyB ? t : 1 - t;
+    if (!sharedEdgeSplits.has(edgeKey)) sharedEdgeSplits.set(edgeKey, []);
+    const values = sharedEdgeSplits.get(edgeKey);
+    if (!values.some(value => Math.abs(value - canonicalT) <= 1e-8)) {
+      values.push(Math.max(0, Math.min(1, canonicalT)));
+    }
+  }
 
-    for (let i = 0; i < currentTriangles.length; i++) {
-      const tri = currentTriangles[i];
-      const e0LenSq = distSq(tri.p0, tri.p1);
-      const e1LenSq = distSq(tri.p1, tri.p2);
-      const e2LenSq = distSq(tri.p2, tri.p0);
-      const maxLenSq = Math.max(e0LenSq, e1LenSq, e2LenSq);
+  function registerBoundaryPoint(tri, point) {
+    const x = point[0];
+    const y = point[1];
+    const epsilon = 1e-7;
+    if (Math.abs(y) <= epsilon) registerSharedEdgeSplit(tri.p0, tri.p1, x);
+    if (Math.abs(1 - x - y) <= epsilon) registerSharedEdgeSplit(tri.p1, tri.p2, y);
+    if (Math.abs(x) <= epsilon) registerSharedEdgeSplit(tri.p2, tri.p0, 1 - y);
+  }
 
-      if (maxLenSq > MIN_SPLIT_EDGE_LEN_SQ && triangleHasVariation(tri)) {
-        splitEdges.add(getEdgeKey(tri.p0, tri.p1));
-        splitEdges.add(getEdgeKey(tri.p1, tri.p2));
-        splitEdges.add(getEdgeKey(tri.p2, tri.p0));
+  for (const tri of initialTriangles) {
+    const exactSegments = traceTextureBoundarySegments(tri, traceStats);
+    tri.exactPaintBoundarySegments = exactSegments;
+    tri.paintBoundarySegments = simplifyPaintBoundaryNetwork(exactSegments, tri, boundaryToleranceMm);
+    for (const segment of tri.paintBoundarySegments) {
+      registerBoundaryPoint(tri, segment[0]);
+      registerBoundaryPoint(tri, segment[1]);
+    }
+  }
+
+  function sharedEdgeParameters(pA, pB) {
+    const keyA = getPosKey(pA[0], pA[1], pA[2]);
+    const keyB = getPosKey(pB[0], pB[1], pB[2]);
+    const canonical = sharedEdgeSplits.get(getEdgeKey(pA, pB)) || [];
+    const parameters = canonical.map(value => keyA <= keyB ? value : 1 - value);
+    parameters.push(0, 1);
+    parameters.sort((a, b) => a - b);
+    return parameters.filter((value, index) => index === 0 || Math.abs(value - parameters[index - 1]) > 1e-8);
+  }
+
+  function triangleBoundaryPoints(tri) {
+    return [
+      sharedEdgeParameters(tri.p0, tri.p1).map(t => [t, 0]),
+      sharedEdgeParameters(tri.p1, tri.p2).map(t => [1 - t, t]),
+      sharedEdgeParameters(tri.p2, tri.p0).map(t => [0, 1 - t]),
+    ];
+  }
+
+  const currentTriangles = [];
+  for (const sourceTri of initialTriangles) {
+    const sourceBoundaryPoints = triangleBoundaryPoints(sourceTri);
+    let localTriangles = triangulatePaintGraph(
+      sourceTri.paintBoundarySegments,
+      sourceBoundaryPoints
+    );
+    let coveredArea = localTriangles.reduce(
+      (sum, region) => sum + Math.abs(polygonArea2D(region.points)), 0
+    );
+    if (boundaryToleranceMm > 0 && Math.abs(coveredArea - 0.5) > 1e-7) {
+      // An aggressive simplification can make nearby contours cross. Revert
+      // this source face to its exact shared boundary instead of emitting an
+      // overlapping or incomplete surface.
+      sourceTri.paintBoundarySegments = simplifyPaintBoundaryNetwork(
+        sourceTri.exactPaintBoundarySegments, sourceTri, 0
+      );
+      localTriangles = triangulatePaintGraph(
+        sourceTri.paintBoundarySegments,
+        sourceBoundaryPoints
+      );
+      coveredArea = localTriangles.reduce(
+        (sum, region) => sum + Math.abs(polygonArea2D(region.points)), 0
+      );
+    }
+    sourceTri.exactPaintBoundarySegments = null;
+    const hasSharedEdgeSplits = sourceBoundaryPoints.some(points => points.length > 2);
+    if (localTriangles.length === 0 && sourceTri.paintBoundarySegments.length === 0 && !hasSharedEdgeSplits) {
+      localTriangles = [{
+        points: [[0, 0], [1, 0], [0, 1]],
+        samplePoint: [1 / 3, 1 / 3],
+      }];
+      coveredArea = 0.5;
+    }
+    if (Math.abs(coveredArea - 0.5) > 1e-7) {
+      throw new Error('A traced texture contour could not be triangulated without gaps. Despeckle or smooth the texture boundary and try again.');
+    }
+
+    for (const regionTriangle of localTriangles) {
+      let localTriangle = regionTriangle.points;
+      if (polygonArea2D(localTriangle) < 0) {
+        localTriangle = [localTriangle[0], localTriangle[2], localTriangle[1]];
+      }
+      const centerUv = localPaintPointToUv(sourceTri, regionTriangle.samplePoint);
+      const paint = sourceTri.sampler(centerUv[0], centerUv[1]);
+      const positions = localTriangle.map(point => localPaintPointToPosition(sourceTri, point));
+      const uvs = localTriangle.map(point => localPaintPointToUv(sourceTri, point));
+      currentTriangles.push({
+        p0: positions[0], p1: positions[1], p2: positions[2],
+        u0: uvs[0][0], v0: uvs[0][1],
+        u1: uvs[1][0], v1: uvs[1][1],
+        u2: uvs[2][0], v2: uvs[2][1],
+        sampler: sourceTri.sampler,
+        chosenColor: paint.color,
+        alpha: paint.alpha,
+      });
+      if (currentTriangles.length > MAX_OUTPUT_TRIANGLES) {
+        throw new Error('Traced paint mesh exceeds the 1,000,000-triangle safety limit. Increase Boundary Accuracy or despeckle the texture.');
       }
     }
-
-    if (splitEdges.size === 0) {
-      break;
-    }
-
-    // A pathological UV layout can map a high-detail texture onto a very
-    // large area. Keep exports loadable and record that the requested paint
-    // resolution could not be reached instead of exhausting browser memory.
-    if (currentTriangles.length * 4 > MAX_OUTPUT_TRIANGLES) {
-      refinementLimited = true;
-      break;
-    }
-
-    const midpointCache = new Map();
-    function getMidpoint(pA, pB) {
-      const ek = getEdgeKey(pA, pB);
-      let m = midpointCache.get(ek);
-      if (!m) {
-        m = [(pA[0] + pB[0]) * 0.5, (pA[1] + pB[1]) * 0.5, (pA[2] + pB[2]) * 0.5];
-        midpointCache.set(ek, m);
-      }
-      return m;
-    }
-
-    const nextTriangles = [];
-
-    for (let i = 0; i < currentTriangles.length; i++) {
-      const tri = currentTriangles[i];
-      const { p0, p1, p2, u0, v0, u1, v1, u2, v2, sampler } = tri;
-
-      const s01 = splitEdges.has(getEdgeKey(p0, p1));
-      const s12 = splitEdges.has(getEdgeKey(p1, p2));
-      const s20 = splitEdges.has(getEdgeKey(p2, p0));
-
-      const splitCount = (s01 ? 1 : 0) + (s12 ? 1 : 0) + (s20 ? 1 : 0);
-
-      if (splitCount === 0) {
-        nextTriangles.push(tri);
-      } else if (splitCount === 1) {
-        if (s01) {
-          const m01 = getMidpoint(p0, p1);
-          const um01 = (u0 + u1) * 0.5, vm01 = (v0 + v1) * 0.5;
-          nextTriangles.push(
-            { p0, p1: m01, p2, u0, v0, u1: um01, v1: vm01, u2, v2, sampler },
-            { p0: m01, p1, p2, u0: um01, v0: vm01, u1, v1, u2, v2, sampler }
-          );
-        } else if (s12) {
-          const m12 = getMidpoint(p1, p2);
-          const um12 = (u1 + u2) * 0.5, vm12 = (v1 + v2) * 0.5;
-          nextTriangles.push(
-            { p0, p1, p2: m12, u0, v0, u1, v1, u2: um12, v2: vm12, sampler },
-            { p0, p1: m12, p2, u0, v0, u1: um12, v1: vm12, u2, v2, sampler }
-          );
-        } else {
-          const m20 = getMidpoint(p2, p0);
-          const um20 = (u2 + u0) * 0.5, vm20 = (v2 + v0) * 0.5;
-          nextTriangles.push(
-            { p0, p1, p2: m20, u0, v0, u1, v1, u2: um20, v2: vm20, sampler },
-            { p0: m20, p1, p2, u0: um20, v0: vm20, u1, v1, u2, v2, sampler }
-          );
-        }
-      } else if (splitCount === 2) {
-        if (s01 && s12) {
-          const m01 = getMidpoint(p0, p1);
-          const um01 = (u0 + u1) * 0.5, vm01 = (v0 + v1) * 0.5;
-          const m12 = getMidpoint(p1, p2);
-          const um12 = (u1 + u2) * 0.5, vm12 = (v1 + v2) * 0.5;
-          nextTriangles.push(
-            { p0: m01, p1, p2: m12, u0: um01, v0: vm01, u1, v1, u2: um12, v2: vm12, sampler },
-            { p0, p1: m01, p2, u0, v0, u1: um01, v1: vm01, u2, v2, sampler },
-            { p0: m01, p1: m12, p2, u0: um01, v0: vm01, u1: um12, v1: vm12, u2, v2, sampler }
-          );
-        } else if (s12 && s20) {
-          const m12 = getMidpoint(p1, p2);
-          const um12 = (u1 + u2) * 0.5, vm12 = (v1 + v2) * 0.5;
-          const m20 = getMidpoint(p2, p0);
-          const um20 = (u2 + u0) * 0.5, vm20 = (v2 + v0) * 0.5;
-          nextTriangles.push(
-            { p0: m12, p1: p2, p2: m20, u0: um12, v0: vm12, u1, v1, u2: um20, v2: vm20, sampler },
-            { p0: p1, p1: m12, p2: p0, u0: u1, v0: v1, u1: um12, v1: vm12, u2: u0, v2: v0, sampler },
-            { p0: m12, p1: m20, p2: p0, u0: um12, v0: vm12, u1: um20, v1: vm20, u2: u0, v2: v0, sampler }
-          );
-        } else {
-          const m20 = getMidpoint(p2, p0);
-          const um20 = (u2 + u0) * 0.5, vm20 = (v2 + v0) * 0.5;
-          const m01 = getMidpoint(p0, p1);
-          const um01 = (u0 + u1) * 0.5, vm01 = (v0 + v1) * 0.5;
-          nextTriangles.push(
-            { p0: m20, p1: p0, p2: m01, u0: um20, v0: vm20, u1: u0, v1: v0, u2: um01, v2: vm01, sampler },
-            { p0: p2, p1: m20, p2: p1, u0: u2, v0: v2, u1: um20, v1: vm20, u2: u1, v2: v1, sampler },
-            { p0: m20, p1: m01, p2: p1, u0: um20, v0: vm20, u1: um01, v1: vm01, u2: u1, v2: v1, sampler }
-          );
-        }
-      } else {
-        // splitCount === 3: Quad-split
-        const m01 = getMidpoint(p0, p1);
-        const um01 = (u0 + u1) * 0.5, vm01 = (v0 + v1) * 0.5;
-        const m12 = getMidpoint(p1, p2);
-        const um12 = (u1 + u2) * 0.5, vm12 = (v1 + v2) * 0.5;
-        const m20 = getMidpoint(p2, p0);
-        const um20 = (u2 + u0) * 0.5, vm20 = (v2 + v0) * 0.5;
-
-        nextTriangles.push(
-          { p0, p1: m01, p2: m20, u0, v0, u1: um01, v1: vm01, u2: um20, v2: vm20, sampler },
-          { p0: m01, p1, p2: m12, u0: um01, v0: vm01, u1, v1, u2: um12, v2: vm12, sampler },
-          { p0: m20, p1: m12, p2, u0: um20, v0: vm20, u1: um12, v1: vm12, u2, v2, sampler },
-          { p0: m01, p1: m12, p2: m20, u0: um01, v0: vm01, u1: um12, v1: vm12, u2: um20, v2: vm20, sampler }
-        );
-      }
-    }
-
-    currentTriangles = nextTriangles;
   }
 
   // 5. WELD VERTICES AND EMIT WATERTIGHT MULTI-MATERIAL 3MF MESH
@@ -2592,25 +3042,12 @@ export async function exportMultiColor3MF(
 
   for (let i = 0; i < currentTriangles.length; i++) {
     const tri = currentTriangles[i];
-    const { p0, p1, p2, u0, v0, u1, v1, u2, v2, sampler } = tri;
-
-    const coverage = sampleCoverage(tri);
+    const { p0, p1, p2, chosenColor, alpha } = tri;
 
     // A fully transparent decal triangle contributes no paint. This only
     // removes the transparent overlay face; the underlying model remains in
     // the export and is never carved by this step.
-    if (coverage.opaqueCount === 0) {
-      continue;
-    }
-
-    let chosenColor = 0;
-    let bestCount = -1;
-    for (const [color, count] of coverage.colors) {
-      if (count > bestCount) {
-        chosenColor = color;
-        bestCount = count;
-      }
-    }
+    if (alpha < 128) continue;
 
     const v0_idx = getOrAddWeldedVertex(p0[0], p0[1], p0[2]);
     const v1_idx = getOrAddWeldedVertex(p1[0], p1[1], p1[2]);
@@ -2622,10 +3059,12 @@ export async function exportMultiColor3MF(
   }
 
   rootObject._lastPaintBake = {
-    requestedResolutionMm: paintStepMm,
-    refinementPasses: MAX_REFINEMENT_PASSES,
-    refinementLimited,
-    triangleCount: emittedTriangleCount
+    boundaryToleranceMm,
+    requestedResolutionMm: boundaryToleranceMm,
+    refinementPasses: 0,
+    refinementLimited: false,
+    tracedBoundarySegments: traceStats.boundarySegments,
+    triangleCount: emittedTriangleCount,
   };
 
   let verticesXml = '';

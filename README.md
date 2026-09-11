@@ -41,7 +41,8 @@ Textured 3D models (from 3D scanners, photogrammetry, game assets, or digital sc
 
 ### 🖨️ Slicer-Ready Multi-Material 3MF Export
 - **Native AMS & MMU Segmentation:** Writes `<m:colorgroup>`, `slic3rpe:mmu_segmentation`, and `paint_color` attributes directly onto the mesh.
-- **Watertight Manifold Topology (Zero Cracks):** Samples colors with original UVs first, then welds coincident vertices along UV seams into shared indices. Eliminates the non-manifold open-edge errors common with multi-body converters.
+- **Feature-Aware Boundary Tracing:** Converts quantized texel boundaries into shared mesh contours instead of uniformly resampling the surface. Boundary Accuracy controls the maximum surface-space simplification error; `0` preserves the exact processed texel outline.
+- **Watertight Manifold Topology (Zero Cracks):** Traces colors with original UVs first, propagates contour intersections across shared edges, then welds coincident vertices along UV seams into shared indices. Eliminates the non-manifold open-edge errors common with multi-body converters.
 - **Z-Up Print Bed Alignment:** Automatically transforms models from Y-Up (web) to Z-Up (slicers) and grounds the lowest point flat to the build plate at $Z = 0$.
 - **Configurable Scale:** Normalizes the model to your desired build size (default 150 mm) so it loads into your slicer at **100% scale** with no scaling warnings.
 

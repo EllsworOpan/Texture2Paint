@@ -1555,7 +1555,7 @@
             <span class="proc-label-with-help">
               <span class="proc-label">Print Detail</span>
               <button class="proc-help" type="button" aria-label="About print detail" aria-expanded="false"
-                aria-describedby="proc-tooltip" data-help="Target size sets the model's maximum printed dimension. A smaller paint-detail value preserves smoother texture edges, but increases 3MF size and export time.">i</button>
+                aria-describedby="proc-tooltip" data-help="Target size sets the model's maximum printed dimension. Boundary accuracy is the maximum contour simplification error on the printed surface. Set it to 0 for an exact texel-boundary trace.">i</button>
             </span>
             <span class="proc-tag">3MF</span>
           </div>
@@ -1571,11 +1571,11 @@
           </div>
 
           <div class="proc-label-row" style="margin-top: 8px;">
-            <label for="proc-paint-resolution" class="proc-tag">Paint Detail</label>
-            <span style="font-size: 10px; color: var(--text-faint);">Surface Resolution</span>
+            <label for="proc-paint-resolution" class="proc-tag">Boundary Accuracy</label>
+            <span style="font-size: 10px; color: var(--text-faint);">Max Contour Error</span>
           </div>
           <div class="proc-slider-row">
-            <input type="number" id="proc-paint-resolution" min="0.10" max="2.00" step="0.05" value="0.25" class="proc-num-input"
+            <input type="number" id="proc-paint-resolution" min="0" max="2.00" step="0.05" value="0.10" class="proc-num-input"
               style="width: 70px;">
             <span style="font-size: 11px; color: var(--text-dim);">mm</span>
           </div>
@@ -2504,7 +2504,7 @@
         const isEnabled = $quantizeToggle.checked;
         const numColors = parseInt($colorsNum.value || '5', 10);
         const targetSizeMm = parseFloat($('proc-size-num')?.value || '150');
-        const paintResolutionMm = parseFloat($('proc-paint-resolution')?.value || '0.25');
+        const paintResolutionMm = parseFloat($('proc-paint-resolution')?.value || '0.10');
         const isUvFlipped = viewer.isUvFlipped();
         const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
         const smoothLevel = parseInt($smoothSlider.value || '0', 10);
@@ -2522,7 +2522,7 @@
         );
         const bake = viewer.currentModel._lastPaintBake;
         if (bake?.refinementLimited) {
-          toast(`Paint bake reached its ${bake.triangleCount.toLocaleString()}-triangle safety limit; use a larger Paint Detail value for a complete bake.`, 'work', 5000);
+          toast(`Paint bake reached its ${bake.triangleCount.toLocaleString()}-triangle safety limit; use a larger Boundary Accuracy value for a complete bake.`, 'work', 5000);
         }
         return {
           data,

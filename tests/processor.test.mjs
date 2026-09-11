@@ -1,6 +1,93 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyUvFlip, extractGlbImages, planTextureWorkingSizes } from '../src/processor.js';
+import * as THREE from 'three';
+import { strFromU8, unzipSync } from 'fflate';
+import {
+  applyUvFlip,
+  exportMultiColor3MF,
+  extractGlbImages,
+  planTextureWorkingSizes,
+} from '../src/processor.js';
+
+function createQuantizedSquareRoot(labels, width, height) {
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let pixel = 0; pixel < width * height; pixel++) {
+    const value = labels[pixel] ? 255 : 0;
+    rgba.set([value, value, value, 255], pixel * 4);
+  }
+  const canvas = {
+    width,
+    height,
+    getContext() {
+      return { getImageData: () => ({ data: rgba }) };
+    },
+  };
+  const texture = new THREE.Texture({ width, height });
+  texture.flipY = false;
+  const material = new THREE.MeshBasicMaterial({ map: texture });
+  material._originalMap = texture;
+  material._quantizedCanvas = canvas;
+  material._quantizedLabels = labels;
+  material._quantizedLabelsWidth = width;
+  material._quantizedLabelsHeight = height;
+  material._quantizationEnabled = true;
+  material._quantizedPalette = [[0, 0, 0], [255, 255, 255]];
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    0, 0, 0,
+    1, 0, 0,
+    1, 1, 0,
+    0, 1, 0,
+  ], 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute([
+    0, 0,
+    1, 0,
+    1, 1,
+    0, 1,
+  ], 2));
+  geometry.setIndex([0, 1, 2, 0, 2, 3]);
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(geometry, material));
+  root._quantizedPalette = material._quantizedPalette;
+  return root;
+}
+
+async function exportedModelXml(root, toleranceMm) {
+  const archive = await exportMultiColor3MF(
+    root, 2, true, 10, false, root._quantizedPalette, 0, 0, toleranceMm
+  );
+  return strFromU8(unzipSync(new Uint8Array(archive))['3D/3dmodel.model']);
+}
+
+function inspectPaintMesh(modelXml) {
+  const vertices = [...modelXml.matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"/g)]
+    .map(match => match.slice(1).map(Number));
+  const triangles = [...modelXml.matchAll(
+    /<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"[^>]*paint_color="(\d+)"/g
+  )].map(match => match.slice(1).map(Number));
+  const areaByColor = new Map();
+  const edgeUses = new Map();
+  for (const [aIndex, bIndex, cIndex, color] of triangles) {
+    const a = vertices[aIndex];
+    const b = vertices[bIndex];
+    const c = vertices[cIndex];
+    const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    const cross = [
+      ab[1] * ac[2] - ab[2] * ac[1],
+      ab[2] * ac[0] - ab[0] * ac[2],
+      ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    const area = Math.hypot(...cross) * 0.5;
+    areaByColor.set(color, (areaByColor.get(color) || 0) + area);
+    for (const edge of [[aIndex, bIndex], [bIndex, cIndex], [cIndex, aIndex]]) {
+      const key = edge.slice().sort((left, right) => left - right).join('|');
+      edgeUses.set(key, (edgeUses.get(key) || 0) + 1);
+    }
+  }
+  return { vertices, triangles, areaByColor, edgeUses };
+}
 
 test('texture working-size planner preserves full source resolution within budget', () => {
   const [size] = planTextureWorkingSizes(
@@ -36,6 +123,69 @@ test('texture working-size planner shares its pixel budget across textures', () 
   assert.ok(sizes.every(size => size.width === size.height));
   assert.ok(sizes.every(size => size.width < 2048));
   assert.ok(sizes.reduce((sum, size) => sum + size.width * size.height, 0) <= 2048 * 2048 + 4096);
+});
+
+test('3MF paint export traces an enclosed texture feature without probe sampling', async () => {
+  const width = 4;
+  const height = 4;
+  const labels = new Uint8Array([
+    0, 0, 0, 0,
+    0, 1, 1, 0,
+    0, 1, 1, 0,
+    0, 0, 0, 0,
+  ]);
+  const root = createQuantizedSquareRoot(labels, width, height);
+  const modelXml = await exportedModelXml(root, 0);
+  const triangles = [...modelXml.matchAll(/<triangle\b[^>]*paint_color="(\d+)"/g)];
+  assert.ok(triangles.length > 2, 'the two source faces should be subdivided around the feature');
+  assert.ok(triangles.some(match => match[1] === '1'));
+  assert.ok(triangles.some(match => match[1] === '2'), 'the enclosed second color must survive tracing');
+
+  const { vertices, areaByColor, edgeUses } = inspectPaintMesh(modelXml);
+  assert.ok(Math.abs((areaByColor.get(1) || 0) - 75) < 1e-6);
+  assert.ok(Math.abs((areaByColor.get(2) || 0) - 25) < 1e-6);
+  for (const [key, uses] of edgeUses) {
+    if (uses !== 1) continue;
+    const [aIndex, bIndex] = key.split('|').map(Number);
+    const midpoint = vertices[aIndex].map((value, axis) => (value + vertices[bIndex][axis]) * 0.5);
+    const onOuterBoundary = Math.abs(midpoint[0]) < 1e-8 || Math.abs(midpoint[0] - 10) < 1e-8 ||
+      Math.abs(midpoint[2]) < 1e-8 || Math.abs(midpoint[2] - 10) < 1e-8;
+    assert.ok(onOuterBoundary, `unexpected unmatched interior edge ${key}`);
+  }
+  assert.equal(root._lastPaintBake.boundaryToleranceMm, 0);
+  assert.ok(root._lastPaintBake.tracedBoundarySegments > 0);
+});
+
+test('3MF boundary accuracy simplifies stair-stepped contours', async () => {
+  const width = 8;
+  const height = 8;
+  const labels = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) labels[y * width + x] = x + y >= width ? 1 : 0;
+  }
+  const root = createQuantizedSquareRoot(labels, width, height);
+  const exactXml = await exportedModelXml(root, 0);
+  const exactCount = [...exactXml.matchAll(/<triangle\b/g)].length;
+  const simplifiedXml = await exportedModelXml(root, 1);
+  const simplifiedCount = [...simplifiedXml.matchAll(/<triangle\b/g)].length;
+  assert.ok(simplifiedCount < exactCount, `${simplifiedCount} should be less than ${exactCount}`);
+  assert.match(simplifiedXml, /paint_color="1"/);
+  assert.match(simplifiedXml, /paint_color="2"/);
+  assert.equal(root._lastPaintBake.boundaryToleranceMm, 1);
+});
+
+test('3MF exact tracing handles checkerboard contour junctions without overlaps', async () => {
+  const labels = new Uint8Array([
+    0, 1, 0, 1,
+    1, 0, 1, 0,
+    0, 1, 0, 1,
+    1, 0, 1, 0,
+  ]);
+  const root = createQuantizedSquareRoot(labels, 4, 4);
+  const modelXml = await exportedModelXml(root, 0);
+  const { areaByColor } = inspectPaintMesh(modelXml);
+  assert.ok(Math.abs((areaByColor.get(1) || 0) - 50) < 1e-6);
+  assert.ok(Math.abs((areaByColor.get(2) || 0) - 50) < 1e-6);
 });
 
 test('applyUvFlip correctly inverts Y coordinates and restores original on unflip', () => {
