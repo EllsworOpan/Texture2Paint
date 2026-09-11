@@ -20,7 +20,9 @@ import {
   quantizePaletteFromSamples,
   repairBufferGeometry,
   sampleModelSurfaceColors,
+  sampleAuthoredSurfaceColor,
   shouldUseDenseMeshPaintFallback,
+  suggestPaletteColorsFromSamples,
 } from '../src/processor.js';
 
 test('texture cleanup preserves its exact established label semantics', () => {
@@ -248,6 +250,21 @@ test('coverage-aware palette does not promote an isolated accent-colored sample'
   assert.ok(palette.every(color => color[0] === color[1] && color[1] === color[2]));
 });
 
+test('palette suggestions add representative colors not already covered', () => {
+  const samples = [
+    ...Array.from({ length: 100 }, () => [240, 20, 20]),
+    ...Array.from({ length: 80 }, () => [20, 40, 230]),
+    ...Array.from({ length: 60 }, () => [20, 210, 60]),
+  ];
+
+  const suggestions = suggestPaletteColorsFromSamples(samples, [[240, 20, 20]], 2);
+
+  assert.deepEqual(new Set(suggestions.map(color => color.join(','))), new Set([
+    '20,40,230',
+    '20,210,60',
+  ]));
+});
+
 test('manual palette assignment uses perceptual rather than raw RGB distance', () => {
   const source = new THREE.Color().setRGB(38 / 255, 216 / 255, 11 / 255, THREE.SRGBColorSpace);
   const material = new THREE.MeshBasicMaterial({ color: source });
@@ -389,6 +406,35 @@ test('surface color sampling composes texture tint and weights by model area', (
     .filter(([r, g, b]) => (r === 128 && g === 0 && b === 0) || (r === 0 && g === 0 && b === 128))
     .reduce((sum, sample) => sum + sample.surfaceWeight, 0);
   assert.ok(Math.abs(greenWeight / tintedWeight - 4) < 1e-10);
+});
+
+test('intersection picking returns authored texture color without lighting', () => {
+  const texture = new THREE.DataTexture(
+    new Uint8Array([255, 0, 0, 255]),
+    1,
+    1,
+    THREE.RGBAFormat
+  );
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.flipY = false;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    0, 0, 0, 1, 0, 0, 0, 1, 0,
+  ], 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute([
+    0, 0, 1, 0, 0, 1,
+  ], 2));
+  const material = new THREE.MeshStandardMaterial({ color: 0x808080, map: texture });
+  material.metalness = 1;
+  material.roughness = 0;
+  const mesh = new THREE.Mesh(geometry, material);
+
+  const color = sampleAuthoredSurfaceColor(mesh, {
+    face: { a: 0, b: 1, c: 2, materialIndex: 0 },
+    barycoord: new THREE.Vector3(0.2, 0.3, 0.5),
+  });
+
+  assert.deepEqual(color, [128, 0, 0]);
 });
 
 test('live texture quantization bakes the material tint exactly once', () => {

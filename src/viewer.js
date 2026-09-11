@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { applyUvFlip, getModelTextures } from './processor.js';
+import { applyUvFlip, getModelTextures, sampleAuthoredSurfaceColor } from './processor.js';
 
 const MATTE_MATERIAL_OVERRIDES = {
   metalness: 0,
@@ -123,6 +123,8 @@ export class Viewer {
     this._isUvFlipped = false;
     this._alphaCutout = true;
     this._alphaTest = 0.5;
+    this._raycaster = new THREE.Raycaster();
+    this._pickPointer = new THREE.Vector2();
 
     addEventListener('resize', () => this._onResize());
 
@@ -184,6 +186,31 @@ export class Viewer {
 
   setAutoRotate(on) {
     this.controls.autoRotate = on;
+  }
+
+  setControlsEnabled(enabled) {
+    this.controls.enabled = Boolean(enabled);
+  }
+
+  /** Returns the unlit authored surface color beneath a viewport coordinate. */
+  pickAuthoredColor(clientX, clientY) {
+    if (!this.currentModel) return null;
+    const canvas = this.renderer.domElement;
+    const rect = canvas.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+      return null;
+    }
+    this._pickPointer.set(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+    this.currentModel.updateWorldMatrix(true, true);
+    this._raycaster.setFromCamera(this._pickPointer, this.camera);
+    for (const intersection of this._raycaster.intersectObject(this.currentModel, true)) {
+      const color = sampleAuthoredSurfaceColor(intersection.object, intersection);
+      if (color) return { color, intersection };
+    }
+    return null;
   }
 
   setWireframe(on) {

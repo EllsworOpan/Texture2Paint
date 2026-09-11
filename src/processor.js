@@ -2031,6 +2031,89 @@ function paletteCandidates(bins, requestedCount, totalWeight) {
   return result;
 }
 
+function assignPaletteObjectiveWeights(bins) {
+  const totalWeight = bins.reduce((sum, bin) => sum + bin.weight, 0);
+  const coverageWeights = bins.map(bin => {
+    const chroma = Math.hypot(bin.oklab[1], bin.oklab[2]);
+    return 1 + PALETTE_CHROMA_COVERAGE_BOOST * (1 - Math.exp(-chroma / 0.08));
+  });
+  const totalCoverageWeight = coverageWeights.reduce((sum, weight) => sum + weight, 0);
+  for (let index = 0; index < bins.length; index++) {
+    const frequencyWeight = bins[index].weight / totalWeight;
+    const coverageWeight = coverageWeights[index] / totalCoverageWeight;
+    bins[index].objectiveWeight = (1 - PALETTE_COVERAGE_BLEND) * frequencyWeight +
+      PALETTE_COVERAGE_BLEND * coverageWeight;
+  }
+  return totalWeight;
+}
+
+/**
+ * Ranks representative source colors that would add the most coverage to an
+ * existing palette. This is the seeded counterpart to palette generation and
+ * is used by the UI to expose useful "next color" choices without replacing
+ * any colors the user has already edited.
+ */
+export function suggestPaletteColorsFromSamples(samples, currentPalette = [], count = 6) {
+  const bins = paletteColorBins(samples);
+  const requestedCount = Math.max(0, Math.floor(Number(count) || 0));
+  if (!bins.length || requestedCount === 0) return [];
+
+  const totalWeight = assignPaletteObjectiveWeights(bins);
+  const candidates = paletteCandidates(
+    bins,
+    Math.min(bins.length, currentPalette.length + requestedCount),
+    totalWeight
+  );
+  const currentLabs = (currentPalette || [])
+    .filter(color => color?.length >= 3)
+    .map(srgbSampleToOklab);
+  const nearestDistances = new Float64Array(bins.length);
+  for (let index = 0; index < bins.length; index++) {
+    nearestDistances[index] = currentLabs.length
+      ? currentLabs.reduce((nearest, color) => Math.min(
+        nearest,
+        paletteSelectionDistanceSquared(bins[index].oklab, color)
+      ), Infinity)
+      : Infinity;
+  }
+
+  const suggestions = [];
+  const usedKeys = new Set();
+  while (suggestions.length < Math.min(requestedCount, candidates.length)) {
+    let best = null;
+    let bestScore = currentLabs.length || suggestions.length ? -1 : Infinity;
+    for (const candidate of candidates) {
+      if (usedKeys.has(candidate.key)) continue;
+      // Avoid offering an imperceptible duplicate of an existing custom color.
+      if (currentLabs.some(color => paletteSelectionDistanceSquared(candidate.oklab, color) < 0.0001)) {
+        usedKeys.add(candidate.key);
+        continue;
+      }
+      let score = 0;
+      for (let index = 0; index < bins.length; index++) {
+        const distance = paletteSelectionDistanceSquared(bins[index].oklab, candidate.oklab);
+        score += bins[index].objectiveWeight * (currentLabs.length || suggestions.length
+          ? Math.max(0, nearestDistances[index] - distance)
+          : distance);
+      }
+      if ((currentLabs.length || suggestions.length) ? score > bestScore : score < bestScore) {
+        bestScore = score;
+        best = candidate;
+      }
+    }
+    if (!best) break;
+    suggestions.push([...best.rgb]);
+    usedKeys.add(best.key);
+    for (let index = 0; index < bins.length; index++) {
+      nearestDistances[index] = Math.min(
+        nearestDistances[index],
+        paletteSelectionDistanceSquared(bins[index].oklab, best.oklab)
+      );
+    }
+  }
+  return suggestions;
+}
+
 /**
  * Selects a surface-aware palette in OKLab. The facility-location objective
  * retains real area as the main signal while a smaller coverage term gives
@@ -2043,19 +2126,7 @@ export function quantizePaletteFromSamples(samples, k = 5) {
   const bins = paletteColorBins(samples);
   if (!bins.length) return [[0, 0, 0], [255, 255, 255]];
 
-  const totalWeight = bins.reduce((sum, bin) => sum + bin.weight, 0);
-  const coverageWeights = bins.map(bin => {
-    const chroma = Math.hypot(bin.oklab[1], bin.oklab[2]);
-    return 1 + PALETTE_CHROMA_COVERAGE_BOOST * (1 - Math.exp(-chroma / 0.08));
-  });
-  const totalCoverageWeight = coverageWeights.reduce((sum, weight) => sum + weight, 0);
-  for (let index = 0; index < bins.length; index++) {
-    const bin = bins[index];
-    const frequencyWeight = bin.weight / totalWeight;
-    const coverageWeight = coverageWeights[index] / totalCoverageWeight;
-    bin.objectiveWeight = (1 - PALETTE_COVERAGE_BLEND) * frequencyWeight +
-      PALETTE_COVERAGE_BLEND * coverageWeight;
-  }
+  const totalWeight = assignPaletteObjectiveWeights(bins);
 
   const candidates = paletteCandidates(bins, k, totalWeight);
   const selected = [];
@@ -2328,6 +2399,36 @@ function effectiveSurfaceColor(
   const alphaCutoff = Math.max(0, material.alphaTest || 0);
   if (alpha <= 0.001 || (alphaCutoff > 0 && alpha < alphaCutoff)) return null;
   return colorToSrgbSample(linearColor);
+}
+
+/**
+ * Samples the authored base color at a Three.js raycast intersection. Unlike a
+ * screen eyedropper, this composes the original base-color texture, material
+ * factor, vertex color, and instance color without lights or tone mapping.
+ */
+export function sampleAuthoredSurfaceColor(mesh, intersection, {
+  maxTextureDimension = PALETTE_TEXTURE_SAMPLE_DIMENSION,
+} = {}) {
+  if (!mesh?.isMesh || !intersection?.face || !mesh.geometry || !isObjectVisible(mesh)) return null;
+  const material = materialAt(mesh, intersection.face.materialIndex || 0);
+  if (!material || material.visible === false) return null;
+  const weights = intersection.barycoord
+    ? [intersection.barycoord.x, intersection.barycoord.y, intersection.barycoord.z]
+    : [1 / 3, 1 / 3, 1 / 3];
+  let instanceColor = null;
+  if (mesh.isInstancedMesh && mesh.instanceColor && Number.isInteger(intersection.instanceId)) {
+    instanceColor = new THREE.Color();
+    mesh.getColorAt(intersection.instanceId, instanceColor);
+  }
+  return effectiveSurfaceColor(
+    material,
+    mesh.geometry,
+    [intersection.face.a, intersection.face.b, intersection.face.c],
+    weights,
+    textureRaster(material._originalMap || material.map, maxTextureDimension),
+    textureRaster(material.alphaMap, maxTextureDimension),
+    instanceColor
+  );
 }
 
 function forEachRenderableTriangle(rootObject, callback) {

@@ -1216,6 +1216,7 @@
       transition: transform .15s, border-color .15s;
       display: inline-block;
       flex-shrink: 0;
+      padding: 0;
     }
 
     .swatch-chip:hover {
@@ -1224,14 +1225,130 @@
       z-index: 5;
     }
 
-    .swatch-picker-input {
+    .swatch-chip.is-selected {
+      border-color: #fff;
+      box-shadow: 0 0 0 2px var(--accent), 0 2px 8px rgba(0, 0, 0, 0.7);
+      transform: scale(1.08);
+    }
+
+    .palette-editor {
+      margin-top: 8px;
+      padding: 9px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: rgba(0, 0, 0, 0.24);
+    }
+
+    .palette-editor[hidden] { display: none; }
+
+    .palette-editor-heading,
+    .palette-editor-actions,
+    .palette-suggestion-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .palette-editor-hex {
+      font: 600 10px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+      color: var(--text-dim);
+    }
+
+    .palette-editor-actions {
+      justify-content: flex-start;
+      margin-top: 8px;
+    }
+
+    .palette-base-picker {
+      height: 30px;
+      padding: 0 9px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 10px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    .palette-base-picker:hover,
+    .palette-base-picker.is-active {
+      border-color: var(--accent);
+      background: rgba(108, 138, 255, 0.16);
+    }
+
+    .palette-spectrum-button {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 30px;
+      padding: 0 9px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--surface);
+      font-size: 10px;
+      font-weight: 650;
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .palette-spectrum-button:hover,
+    .palette-spectrum-button:focus-within {
+      border-color: var(--accent);
+      background: rgba(108, 138, 255, 0.16);
+    }
+
+    .palette-wheel-icon {
+      width: 15px;
+      height: 15px;
+      flex: 0 0 15px;
+      border-radius: 50%;
+      background: conic-gradient(#ff4d4d, #ffd84d, #58e36d, #4ddde8, #5f72ff, #d85cff, #ff4d4d);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.5);
+    }
+
+    .palette-spectrum-button input[type=color] {
       position: absolute;
-      inset: -10px;
-      width: 200%;
-      height: 200%;
+      inset: 0;
+      width: 100%;
+      height: 100%;
       opacity: 0;
       cursor: pointer;
     }
+
+    .palette-suggestion-heading {
+      margin-top: 9px;
+      font-size: 10px;
+      color: var(--text-dim);
+    }
+
+    .palette-suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 6px;
+    }
+
+    .palette-suggestion {
+      width: 25px;
+      height: 25px;
+      padding: 0;
+      border: 1px solid rgba(255, 255, 255, 0.45);
+      border-radius: 5px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+      cursor: pointer;
+    }
+
+    .palette-suggestion:hover,
+    .palette-suggestion:focus-visible {
+      border-color: #fff;
+      transform: translateY(-1px);
+    }
+
+    canvas.is-picking-base-color { cursor: crosshair !important; }
 
     @media (max-width: 860px) {
       .proc-toolbar {
@@ -1631,9 +1748,31 @@
 
           <div class="proc-label-row" style="margin-top: 8px;">
             <span class="proc-tag">Custom Palette</span>
+            <span style="font-size: 10px; color: var(--text-faint);">Select a swatch to edit</span>
           </div>
           <div class="palette-swatches-container" id="proc-swatches-strip">
             <span style="font-size: 10px; color: var(--text-faint);">Load a model to build a palette</span>
+          </div>
+          <div class="palette-editor" id="palette-editor" hidden>
+            <div class="palette-editor-heading">
+              <span class="proc-tag" id="palette-editor-title">Edit color</span>
+              <span class="palette-editor-hex" id="palette-editor-hex"></span>
+            </div>
+            <div class="palette-editor-actions">
+              <button class="palette-base-picker" id="palette-base-picker" type="button"
+                title="Sample the model's original surface color without lighting or reflections">⌾ Pick from model</button>
+              <label class="palette-spectrum-button" for="palette-full-spectrum"
+                title="Open the full color picker">
+                <span class="palette-wheel-icon" aria-hidden="true"></span>
+                <span>Choose any color</span>
+                <input type="color" id="palette-full-spectrum" value="#ffffff"
+                  aria-label="Choose any color from the full spectrum">
+              </label>
+            </div>
+            <div class="palette-suggestion-heading">
+              <span>Suggested colors from this model</span>
+            </div>
+            <div class="palette-suggestions" id="palette-suggestions"></div>
           </div>
         </div>
 
@@ -1828,6 +1967,8 @@
       analyzeMeshHealth,
       applyLiveMeshSimplification,
       estimatePaintOutputBudget,
+      sampleModelSurfaceColors,
+      suggestPaletteColorsFromSamples,
       RECOMMENDED_PAINT_OUTPUT_TRIANGLES
     } from './src/processor.js';
     import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
@@ -1904,6 +2045,12 @@
     const $smoothSlider = $('proc-smooth-slider');
     const $smoothBadge = $('proc-smooth-badge');
     const $resampleBtn = $('proc-resample-btn');
+    const $paletteEditor = $('palette-editor');
+    const $paletteEditorTitle = $('palette-editor-title');
+    const $paletteEditorHex = $('palette-editor-hex');
+    const $paletteBasePicker = $('palette-base-picker');
+    const $paletteFullSpectrum = $('palette-full-spectrum');
+    const $paletteSuggestions = $('palette-suggestions');
     const $materialEffectsChip = $('chip-material-effects');
     const $procTabs = [...document.querySelectorAll('[data-proc-tab]')];
     const $procTabPanels = [...document.querySelectorAll('.proc-tab-panel')];
@@ -2026,6 +2173,8 @@
     let lastSourceGlbBuffer = null;
     let lastResourceUrls = [];
     let activePalette = [];
+    let selectedPaletteIndex = -1;
+    let palettePickActive = false;
     let sourceModelDocument = null;
     let decalAnalysis = { components: [], candidates: [] };
     let rebuildRevision = 0;
@@ -2720,6 +2869,8 @@
         if (!$procRepairToggle.checked && !$simplifyToggle.checked) updateMeshDiagnostics();
 
         // Initialize palette and swatches immediately on file load
+        cancelBaseColorPick();
+        selectedPaletteIndex = -1;
         activePalette = [];
         updateQuantization(false, {
           forceStructural: $procRepairToggle.checked || $simplifyToggle.checked
@@ -2904,45 +3055,151 @@
       throw new Error(`Unsupported export format: ${format}`);
     }
 
-    // Render interactive palette chips with color pickers
+    function colorToHex(color) {
+      return '#' + color.map(value => Math.max(0, Math.min(255, Math.round(value)))
+        .toString(16).padStart(2, '0')).join('');
+    }
+
+    function cancelBaseColorPick() {
+      if (!palettePickActive) return;
+      palettePickActive = false;
+      $paletteBasePicker.classList.remove('is-active');
+      $paletteBasePicker.textContent = '⌾ Pick from model';
+      viewer.renderer.domElement.classList.remove('is-picking-base-color');
+      viewer.setControlsEnabled(true);
+    }
+
+    function paletteSourceSamples() {
+      const model = viewer.currentModel;
+      if (!model) return [];
+      const revision = model._texture2PaintProcessingRevision;
+      const cached = model._texture2PaintSurfaceSampleCache;
+      if (cached && (revision === undefined || cached.revision === revision)) return cached.samples;
+      const samples = sampleModelSurfaceColors(model);
+      if (revision !== undefined) model._texture2PaintSurfaceSampleCache = { revision, samples };
+      return samples;
+    }
+
+    function renderPaletteEditor() {
+      if (selectedPaletteIndex < 0 || !activePalette[selectedPaletteIndex]) {
+        $paletteEditor.hidden = true;
+        cancelBaseColorPick();
+        return;
+      }
+      const color = activePalette[selectedPaletteIndex];
+      const hex = colorToHex(color);
+      $paletteEditor.hidden = false;
+      $paletteEditorTitle.textContent = `Edit color ${selectedPaletteIndex + 1}`;
+      $paletteEditorHex.textContent = hex.toUpperCase();
+      $paletteFullSpectrum.value = hex;
+      $paletteSuggestions.innerHTML = '';
+      const suggestions = suggestPaletteColorsFromSamples(paletteSourceSamples(), activePalette, 8);
+      for (const suggestion of suggestions) {
+        const suggestionHex = colorToHex(suggestion);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'palette-suggestion';
+        button.style.backgroundColor = suggestionHex;
+        button.title = `Use ${suggestionHex.toUpperCase()} — suggested from the model`;
+        button.setAttribute('aria-label', button.title);
+        button.addEventListener('click', () => setPaletteColor(selectedPaletteIndex, suggestion));
+        $paletteSuggestions.appendChild(button);
+      }
+      if (!$paletteSuggestions.children.length) {
+        $paletteSuggestions.innerHTML = '<span style="font-size: 10px; color: var(--text-faint);">All sampled colors are already represented</span>';
+      }
+    }
+
+    function setPaletteColor(index, color, { refreshSuggestions = true } = {}) {
+      if (!activePalette[index]) return;
+      activePalette[index] = color.map(value => Math.max(0, Math.min(255, Math.round(value))));
+      if (refreshSuggestions) {
+        renderSwatches(activePalette);
+      } else {
+        const hex = colorToHex(activePalette[index]);
+        const chip = $swatchesStrip.children[index];
+        if (chip) {
+          chip.style.backgroundColor = hex;
+          chip.title = `Color ${index + 1}: ${hex.toUpperCase()} (click to edit)`;
+          chip.setAttribute('aria-label', chip.title);
+        }
+        $paletteEditorHex.textContent = hex.toUpperCase();
+      }
+      updateQuantization(false, { renderPalette: false });
+    }
+
+    // Render interactive palette chips. Selecting one opens the guided editor.
     function renderSwatches(palette) {
       $swatchesStrip.innerHTML = '';
       if (!palette || palette.length === 0) {
         $swatchesStrip.innerHTML = '<span style="font-size: 10px; color: var(--text-faint);">Load a model to view palette</span>';
+        selectedPaletteIndex = -1;
+        renderPaletteEditor();
         return;
       }
 
-      palette.forEach((c, idx) => {
-        const hex = '#' + c.map(v => v.toString(16).padStart(2, '0')).join('');
-
-        const label = document.createElement('label');
-        label.className = 'swatch-chip';
-        label.style.backgroundColor = hex;
-        label.title = `Color ${idx + 1}: ${hex.toUpperCase()} (Click to eyedrop/edit)`;
-
-        const picker = document.createElement('input');
-        picker.type = 'color';
-        picker.value = hex;
-        picker.className = 'swatch-picker-input';
-
-        // When user picks a custom color or uses eyedropper:
-        picker.addEventListener('input', e => {
-          const newHex = e.target.value;
-          label.style.backgroundColor = newHex;
-          label.title = `Color ${idx + 1}: ${newHex.toUpperCase()} (Click to eyedrop/edit)`;
-
-          const r = parseInt(newHex.slice(1, 3), 16);
-          const g = parseInt(newHex.slice(3, 5), 16);
-          const b = parseInt(newHex.slice(5, 7), 16);
-          activePalette[idx] = [r, g, b];
-
-          updateQuantization(false, { renderPalette: false });
+      if (selectedPaletteIndex >= palette.length) selectedPaletteIndex = palette.length - 1;
+      palette.forEach((color, index) => {
+        const hex = colorToHex(color);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'swatch-chip' + (index === selectedPaletteIndex ? ' is-selected' : '');
+        button.style.backgroundColor = hex;
+        button.title = `Color ${index + 1}: ${hex.toUpperCase()} (click to edit)`;
+        button.setAttribute('aria-label', button.title);
+        button.addEventListener('click', () => {
+          cancelBaseColorPick();
+          selectedPaletteIndex = index;
+          renderSwatches(activePalette);
         });
-
-        label.appendChild(picker);
-        $swatchesStrip.appendChild(label);
+        $swatchesStrip.appendChild(button);
       });
+      renderPaletteEditor();
     }
+
+    $paletteFullSpectrum.addEventListener('input', event => {
+      const hex = event.target.value;
+      setPaletteColor(selectedPaletteIndex, [
+        parseInt(hex.slice(1, 3), 16),
+        parseInt(hex.slice(3, 5), 16),
+        parseInt(hex.slice(5, 7), 16),
+      ], { refreshSuggestions: false });
+    });
+
+    $paletteFullSpectrum.addEventListener('change', () => renderSwatches(activePalette));
+
+    $paletteBasePicker.addEventListener('click', () => {
+      if (palettePickActive) {
+        cancelBaseColorPick();
+        return;
+      }
+      if (selectedPaletteIndex < 0 || !viewer.currentModel) return;
+      palettePickActive = true;
+      $paletteBasePicker.classList.add('is-active');
+      $paletteBasePicker.textContent = 'Click the model…';
+      viewer.renderer.domElement.classList.add('is-picking-base-color');
+      viewer.setControlsEnabled(false);
+      toast('Click the model to sample its unlit base color · Esc to cancel', 'work', 3500);
+    });
+
+    viewer.renderer.domElement.addEventListener('click', event => {
+      if (!palettePickActive) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const picked = viewer.pickAuthoredColor(event.clientX, event.clientY);
+      if (!picked) {
+        toast('No visible model surface at that point — try again or press Esc', 'work', 2500);
+        return;
+      }
+      const paletteIndex = selectedPaletteIndex;
+      cancelBaseColorPick();
+      setPaletteColor(paletteIndex, picked.color);
+      toast(`Picked base color ${colorToHex(picked.color).toUpperCase()} (lighting ignored)`, 'ok', 2200);
+    }, true);
+
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && palettePickActive) cancelBaseColorPick();
+    });
 
     let quantizeTimer;
     function updateQuantization(forceResample = false, options = {}) {

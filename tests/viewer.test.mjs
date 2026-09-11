@@ -149,3 +149,25 @@ test('superseded model resources are disposed exactly once', () => {
   assert.equal(textureDisposals, 1);
   assert.equal(originalTextureDisposals, 1);
 });
+
+test('viewport picking raycasts to an unlit authored surface color', () => {
+  const material = new THREE.MeshStandardMaterial({ color: 0x336699 });
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material));
+  const viewer = testViewer(root);
+  viewer.renderer = {
+    domElement: {
+      getBoundingClientRect: () => ({ left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100 }),
+    },
+  };
+  viewer.camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+  viewer.camera.position.set(0, 0, 2);
+  viewer.camera.lookAt(0, 0, 0);
+  viewer.camera.updateMatrixWorld();
+  viewer._raycaster = new THREE.Raycaster();
+  viewer._pickPointer = new THREE.Vector2();
+
+  const picked = viewer.pickAuthoredColor(50, 50);
+
+  assert.deepEqual(picked.color, [51, 102, 153]);
+});
