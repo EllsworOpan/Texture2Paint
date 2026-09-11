@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { zipSync, strToU8 } from 'fflate';
+import { zip, zipSync, strToU8 } from 'fflate';
 
 /**
  * Converts any attribute to Float32BufferAttribute.
@@ -326,14 +326,26 @@ export function canonicalizeModel(rootObject, { mergeMeshes = false } = {}) {
 export function cloneModelForProcessing(rootObject) {
   if (!rootObject) return null;
   const clone = rootObject.clone(true);
+  const textureClones = new Map();
+  const cloneTexture = texture => {
+    if (!texture) return texture;
+    if (!textureClones.has(texture)) textureClones.set(texture, texture.clone());
+    return textureClones.get(texture);
+  };
   clone.traverse(child => {
     if (!child.isMesh) return;
     if (child.geometry) child.geometry = child.geometry.clone();
     const cloneMaterial = mat => {
       if (!mat) return mat;
       const next = mat.clone();
-      for (const slot of ['map', 'alphaMap', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap']) {
-        if (next[slot]) next[slot] = next[slot].clone();
+      for (const slot of [
+        'map', 'alphaMap', 'aoMap', 'bumpMap', 'normalMap', 'displacementMap',
+        'emissiveMap', 'metalnessMap', 'roughnessMap', 'clearcoatMap',
+        'clearcoatNormalMap', 'clearcoatRoughnessMap', 'iridescenceMap',
+        'iridescenceThicknessMap', 'sheenColorMap', 'sheenRoughnessMap',
+        'specularColorMap', 'specularIntensityMap', 'thicknessMap', 'transmissionMap',
+      ]) {
+        if (next[slot]) next[slot] = cloneTexture(next[slot]);
       }
       return next;
     };
@@ -2274,6 +2286,13 @@ function closestPaletteIndex(sample, palette, paletteOklab = null) {
  * using the same perceptual metric as palette generation.
  */
 function createIndexLUT(palette) {
+  const key = palette.map(color => color.join(',')).join(';');
+  const cached = paletteLutCache.get(key);
+  if (cached) {
+    paletteLutCache.delete(key);
+    paletteLutCache.set(key, cached);
+    return cached;
+  }
   const lut = new Uint8Array(32768);
   const perceptualPalette = palette.map(srgbSampleToOklab);
   for (let r = 0; r < 32; r++) {
@@ -2288,8 +2307,14 @@ function createIndexLUT(palette) {
       }
     }
   }
+  paletteLutCache.set(key, lut);
+  if (paletteLutCache.size > 32) {
+    paletteLutCache.delete(paletteLutCache.keys().next().value);
+  }
   return lut;
 }
+
+const paletteLutCache = new Map();
 
 /**
  * BFS Island Filter: removes contiguous color patches smaller than minSize pixels.
@@ -2318,23 +2343,45 @@ function despeckleLabels(labels, width, height, minSize, numColors) {
         const cx = curr % width;
         const cy = (curr / width) | 0;
 
-        const neighbors = [];
-        if (cx > 0) neighbors.push(curr - 1);
-        if (cx < width - 1) neighbors.push(curr + 1);
-        if (cy > 0) neighbors.push(curr - width);
-        if (cy < height - 1) neighbors.push(curr + width);
-
-        for (let n = 0; n < neighbors.length; n++) {
-          const nIdx = neighbors[n];
+        if (cx > 0) {
+          const nIdx = curr - 1;
           const nColor = labels[nIdx];
           if (nColor === color) {
             if (!visited[nIdx]) {
               visited[nIdx] = 1;
               queue[tail++] = nIdx;
             }
-          } else {
-            borderVotes[nColor]++;
-          }
+          } else borderVotes[nColor]++;
+        }
+        if (cx < width - 1) {
+          const nIdx = curr + 1;
+          const nColor = labels[nIdx];
+          if (nColor === color) {
+            if (!visited[nIdx]) {
+              visited[nIdx] = 1;
+              queue[tail++] = nIdx;
+            }
+          } else borderVotes[nColor]++;
+        }
+        if (cy > 0) {
+          const nIdx = curr - width;
+          const nColor = labels[nIdx];
+          if (nColor === color) {
+            if (!visited[nIdx]) {
+              visited[nIdx] = 1;
+              queue[tail++] = nIdx;
+            }
+          } else borderVotes[nColor]++;
+        }
+        if (cy < height - 1) {
+          const nIdx = curr + width;
+          const nColor = labels[nIdx];
+          if (nColor === color) {
+            if (!visited[nIdx]) {
+              visited[nIdx] = 1;
+              queue[tail++] = nIdx;
+            }
+          } else borderVotes[nColor]++;
         }
       }
 
@@ -2361,11 +2408,18 @@ function despeckleLabels(labels, width, height, minSize, numColors) {
 /**
  * Mode/Majority Filter: smooths jagged boundaries and rounds out features.
  */
+function recordSmoothingVote(votes, touchedColors, touchedCount, color, amount = 1) {
+  if (votes[color] === 0) touchedColors[touchedCount++] = color;
+  votes[color] += amount;
+  return touchedCount;
+}
+
 function smoothBoundaries(labels, width, height, passes, numColors) {
   if (passes <= 0) return labels;
   let src = labels;
   let dst = new Uint8Array(width * height);
   const votes = new Int32Array(numColors);
+  const touchedColors = new Int32Array(10);
 
   for (let p = 0; p < passes; p++) {
     for (let y = 0; y < height; y++) {
@@ -2376,30 +2430,33 @@ function smoothBoundaries(labels, width, height, passes, numColors) {
       for (let x = 0; x < width; x++) {
         const currIdx = yOffset + x;
         const selfColor = src[currIdx];
-        votes.fill(0);
+        let touchedCount = 0;
 
         const xPrev = x > 0 ? x - 1 : x;
         const xNext = x < width - 1 ? x + 1 : x;
 
-        votes[src[yPrev + xPrev]]++;
-        votes[src[yPrev + x]]++;
-        votes[src[yPrev + xNext]]++;
+        touchedCount = recordSmoothingVote(votes, touchedColors, touchedCount, src[yPrev + xPrev]);
+        touchedCount = recordSmoothingVote(votes, touchedColors, touchedCount, src[yPrev + x]);
+        touchedCount = recordSmoothingVote(votes, touchedColors, touchedCount, src[yPrev + xNext]);
+        touchedCount = recordSmoothingVote(votes, touchedColors, touchedCount, src[yOffset + xPrev]);
+        touchedCount = recordSmoothingVote(votes, touchedColors, touchedCount, selfColor, 2);
+        touchedCount = recordSmoothingVote(votes, touchedColors, touchedCount, src[yOffset + xNext]);
+        touchedCount = recordSmoothingVote(votes, touchedColors, touchedCount, src[yNext + xPrev]);
+        touchedCount = recordSmoothingVote(votes, touchedColors, touchedCount, src[yNext + x]);
+        touchedCount = recordSmoothingVote(votes, touchedColors, touchedCount, src[yNext + xNext]);
 
-        votes[src[yOffset + xPrev]]++;
-        votes[src[currIdx]] += 2; // Center weight prevents erosion
-        votes[src[yOffset + xNext]]++;
-
-        votes[src[yNext + xPrev]]++;
-        votes[src[yNext + x]]++;
-        votes[src[yNext + xNext]]++;
-
-        let maxVotes = 0;
+        let maxVotes = -1;
         let bestColor = selfColor;
-        for (let c = 0; c < numColors; c++) {
-          if (votes[c] > maxVotes) {
-            maxVotes = votes[c];
-            bestColor = c;
+        for (let i = 0; i < touchedCount; i++) {
+          const color = touchedColors[i];
+          if (votes[color] > maxVotes ||
+            (votes[color] === maxVotes && color < bestColor)) {
+            maxVotes = votes[color];
+            bestColor = color;
           }
+        }
+        for (let i = 0; i < touchedCount; i++) {
+          votes[touchedColors[i]] = 0;
         }
 
         dst[currIdx] = bestColor;
@@ -2473,12 +2530,16 @@ function setVertexColorPaletteShader(material, palette, enabled) {
     material._texture2PaintShaderOriginal = {
       onBeforeCompile: material.onBeforeCompile,
       customProgramCacheKey: material.customProgramCacheKey,
+      shader: null,
+      colors: [],
     };
   }
   const original = material._texture2PaintShaderOriginal;
   if (!enabled) {
+    if (!material._vertexQuantizationEnabled) return;
     material.onBeforeCompile = original.onBeforeCompile;
     material.customProgramCacheKey = original.customProgramCacheKey;
+    original.shader = null;
     material._vertexQuantizationEnabled = false;
     material.needsUpdate = true;
     return;
@@ -2488,11 +2549,17 @@ function setVertexColorPaletteShader(material, palette, enabled) {
     color.setRGB(sample[0] / 255, sample[1] / 255, sample[2] / 255, THREE.SRGBColorSpace);
     return color;
   });
-  const cacheKey = palette.map(color => color.join(',')).join(';');
+  original.colors = colors;
+  if (original.shader) {
+    original.shader.uniforms.texture2PaintPalette.value = colors;
+    original.shader.uniforms.texture2PaintPaletteCount.value = colors.length;
+  }
+  if (material._vertexQuantizationEnabled) return;
   material.onBeforeCompile = shader => {
     original.onBeforeCompile?.call(material, shader);
-    shader.uniforms.texture2PaintPalette = { value: colors };
-    shader.uniforms.texture2PaintPaletteCount = { value: colors.length };
+    original.shader = shader;
+    shader.uniforms.texture2PaintPalette = { value: original.colors };
+    shader.uniforms.texture2PaintPaletteCount = { value: original.colors.length };
     shader.fragmentShader = `
 uniform vec3 texture2PaintPalette[32];
 uniform int texture2PaintPaletteCount;
@@ -2512,9 +2579,50 @@ for (int texture2PaintIndex = 0; texture2PaintIndex < 32; texture2PaintIndex++) 
 diffuseColor.rgb = texture2PaintBestColor;
 `);
   };
-  material.customProgramCacheKey = () => `${original.customProgramCacheKey?.call(material) || ''}|texture2paint:${cacheKey}`;
+  material.customProgramCacheKey = () => `${original.customProgramCacheKey?.call(material) || ''}|texture2paint:vertex-palette-v1`;
   material._vertexQuantizationEnabled = true;
   material.needsUpdate = true;
+}
+
+function paintQuantizedTexture(material, cache, sourceMap, palette, labels, plannedSize, rootObject) {
+  const { canvas, context, imageData } = cache;
+  const data = imageData.data;
+  data.set(cache.sourceData);
+  for (let offset = 0, pixel = 0; offset < data.length; offset += 4, pixel++) {
+    const color = palette[labels[pixel]];
+    data[offset] = color[0];
+    data[offset + 1] = color[1];
+    data[offset + 2] = color[2];
+  }
+  context.putImageData(imageData, 0, 0);
+
+  const texture = cache.texture || new THREE.CanvasTexture(canvas);
+  cache.texture = texture;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.flipY = sourceMap.flipY;
+  texture.wrapS = sourceMap.wrapS;
+  texture.wrapT = sourceMap.wrapT;
+  texture.offset.copy(sourceMap.offset);
+  texture.repeat.copy(sourceMap.repeat);
+  texture.center.copy(sourceMap.center);
+  texture.rotation = sourceMap.rotation;
+  texture.channel = sourceMap.channel;
+  texture.magFilter = sourceMap.magFilter;
+  texture.minFilter = sourceMap.minFilter;
+  texture.anisotropy = sourceMap.anisotropy;
+  texture.matrixAutoUpdate = sourceMap.matrixAutoUpdate;
+  if (sourceMap.matrixAutoUpdate === false) texture.matrix.copy(sourceMap.matrix);
+
+  material.map = texture;
+  material.color?.setRGB(1, 1, 1);
+  material._quantizedCanvas = canvas;
+  material._quantizedLabels = labels;
+  material._quantizedLabelsWidth = cache.width;
+  material._quantizedLabelsHeight = cache.height;
+  material._quantizationEnabled = true;
+  material._textureProcessingResolution = plannedSize;
+  rootObject._textureResolutionInfo.push(plannedSize);
+  texture.needsUpdate = true;
 }
 
 /**
@@ -2528,7 +2636,8 @@ export function applyLiveColorQuantization(
   customPalette = null,
   despeckleSize = 0,
   smoothLevel = 0,
-  forceResample = false
+  forceResample = false,
+  options = {}
 ) {
   if (!rootObject) return [];
   let extractedPalette = [];
@@ -2567,7 +2676,17 @@ export function applyLiveColorQuantization(
     }
   }
 
-  const collectModelSamples = () => sampleModelSurfaceColors(rootObject);
+  const collectModelSamples = () => {
+    const revision = rootObject._texture2PaintProcessingRevision;
+    if (revision !== undefined && rootObject._texture2PaintSurfaceSampleCache?.revision === revision) {
+      return rootObject._texture2PaintSurfaceSampleCache.samples;
+    }
+    const samples = sampleModelSurfaceColors(rootObject);
+    if (revision !== undefined) {
+      rootObject._texture2PaintSurfaceSampleCache = { revision, samples };
+    }
+    return samples;
+  };
 
   // 1. Determine a single unified palette across the entire model
   if (customPalette && customPalette.length > 0) {
@@ -2612,7 +2731,6 @@ export function applyLiveColorQuantization(
       }
       mat._quantizationEnabled = true;
     }
-    mat.needsUpdate = true;
   }
 
   for (let materialIndex = 0; materialIndex < texturedMaterials.length; materialIndex++) {
@@ -2628,76 +2746,255 @@ export function applyLiveColorQuantization(
       continue;
     }
 
-    const origImage = mat._originalMap.image;
+    const sourceMap = mat._originalMap;
+    const origImage = sourceMap.image;
     const plannedSize = resolutionPlan[materialIndex];
-    const canvas = document.createElement('canvas');
-    canvas.width = plannedSize.width;
-    canvas.height = plannedSize.height;
-    const W = canvas.width;
-    const H = canvas.height;
-
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(origImage, 0, 0, W, H);
-    const imgData = ctx.getImageData(0, 0, W, H);
-    const data = imgData.data;
-
-    let labels = new Uint8Array(W * H);
     const baseColor = mat._originalColor || mat.color || new THREE.Color(1, 1, 1);
-    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-      const effective = effectiveTexturePixelSample(data, i, mat._originalMap, baseColor);
-      const lutIdx = ((effective[0] >> 3) << 10) |
-        ((effective[1] >> 3) << 5) | (effective[2] >> 3);
-      labels[p] = indexLut[lutIdx];
+    let cache = mat._texture2PaintTextureCache;
+    const cacheMatches = cache && cache.image === origImage &&
+      cache.sourceTextureVersion === sourceMap.version &&
+      cache.width === plannedSize.width && cache.height === plannedSize.height &&
+      cache.baseRed === baseColor.r && cache.baseGreen === baseColor.g && cache.baseBlue === baseColor.b;
+    if (!cacheMatches) {
+      cache?.texture?.dispose?.();
+      const canvas = document.createElement('canvas');
+      canvas.width = plannedSize.width;
+      canvas.height = plannedSize.height;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(origImage, 0, 0, canvas.width, canvas.height);
+      const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+      const sourceData = new Uint8ClampedArray(imageData.data);
+      const effectiveIndices = new Uint16Array(canvas.width * canvas.height);
+      for (let offset = 0, pixel = 0; offset < sourceData.length; offset += 4, pixel++) {
+        const effective = effectiveTexturePixelSample(sourceData, offset, sourceMap, baseColor);
+        effectiveIndices[pixel] = ((effective[0] >> 3) << 10) |
+          ((effective[1] >> 3) << 5) | (effective[2] >> 3);
+      }
+      cache = {
+        image: origImage,
+        sourceTextureVersion: sourceMap.version,
+        width: canvas.width,
+        height: canvas.height,
+        baseRed: baseColor.r,
+        baseGreen: baseColor.g,
+        baseBlue: baseColor.b,
+        canvas,
+        context,
+        imageData,
+        sourceData,
+        effectiveIndices,
+        rawLabels: new Map(),
+        despeckledLabels: new Map(),
+        smoothedLabels: new Map(),
+        texture: null,
+      };
+      mat._texture2PaintTextureCache = cache;
     }
 
-    labels = processTextureLabels(
-      labels, W, H, extractedPalette.length, despeckleSize, smoothLevel
-    );
-
-    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-      const c = extractedPalette[labels[p]];
-      data[i] = c[0];
-      data[i + 1] = c[1];
-      data[i + 2] = c[2];
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    const newTexture = new THREE.CanvasTexture(canvas);
-    newTexture.colorSpace = THREE.SRGBColorSpace;
-    newTexture.flipY = mat._originalMap.flipY;
-    newTexture.wrapS = mat._originalMap.wrapS;
-    newTexture.wrapT = mat._originalMap.wrapT;
-    newTexture.offset.copy(mat._originalMap.offset);
-    newTexture.repeat.copy(mat._originalMap.repeat);
-    newTexture.center.copy(mat._originalMap.center);
-    newTexture.rotation = mat._originalMap.rotation;
-    newTexture.channel = mat._originalMap.channel;
-    newTexture.magFilter = mat._originalMap.magFilter;
-    newTexture.minFilter = mat._originalMap.minFilter;
-    newTexture.anisotropy = mat._originalMap.anisotropy;
-    newTexture.matrixAutoUpdate = mat._originalMap.matrixAutoUpdate;
-    if (mat._originalMap.matrixAutoUpdate === false) {
-      newTexture.matrix.copy(mat._originalMap.matrix);
+    const W = cache.width;
+    const H = cache.height;
+    const paletteKey = extractedPalette.map(color => color.join(',')).join(';');
+    let rawLabels = cache.rawLabels.get(paletteKey);
+    if (!rawLabels) {
+      rawLabels = new Uint8Array(W * H);
+      for (let pixel = 0; pixel < rawLabels.length; pixel++) {
+        rawLabels[pixel] = indexLut[cache.effectiveIndices[pixel]];
+      }
+      cache.rawLabels.set(paletteKey, rawLabels);
+      if (cache.rawLabels.size > 8) cache.rawLabels.delete(cache.rawLabels.keys().next().value);
     }
 
-    mat.map = newTexture;
-    // The material tint has already been baked into the palette assignment.
-    // Resetting it prevents the quantized texture from being tinted twice.
-    mat.color?.setRGB(1, 1, 1);
-    mat._quantizedCanvas = canvas;
-    // Keep the discrete source of truth as well as the display canvas.  The
-    // canvas is filtered by WebGL in the viewport, whereas 3MF paint needs a
-    // single, unambiguous palette index for every sample it bakes into a face.
-    mat._quantizedLabels = labels;
-    mat._quantizedLabelsWidth = W;
-    mat._quantizedLabelsHeight = H;
-    mat._quantizationEnabled = true;
-    mat._textureProcessingResolution = plannedSize;
-    rootObject._textureResolutionInfo.push(plannedSize);
-    mat.needsUpdate = true;
+    if (options.prepareOnly && (despeckleSize > 0 || smoothLevel > 0)) {
+      mat._texture2PaintPendingLabels = {
+        rawLabels,
+        paletteKey,
+        despeckleSize,
+        smoothLevel,
+        plannedSize,
+      };
+      continue;
+    }
+
+    const despeckleKey = `${paletteKey}|${despeckleSize}`;
+    let despeckled = cache.despeckledLabels.get(despeckleKey);
+    if (!despeckled) {
+      despeckled = rawLabels.slice();
+      if (despeckleSize > 0) {
+        despeckled = despeckleLabels(
+          despeckled, W, H, despeckleSize, extractedPalette.length
+        );
+      }
+      cache.despeckledLabels.set(despeckleKey, despeckled);
+      if (cache.despeckledLabels.size > 12) {
+        cache.despeckledLabels.delete(cache.despeckledLabels.keys().next().value);
+      }
+    }
+
+    let labels = despeckled;
+    for (let pass = 1; pass <= smoothLevel; pass++) {
+      const smoothKey = `${despeckleKey}|${pass}`;
+      let smoothed = cache.smoothedLabels.get(smoothKey);
+      if (!smoothed) {
+        smoothed = smoothBoundaries(labels, W, H, 1, extractedPalette.length);
+        cache.smoothedLabels.set(smoothKey, smoothed);
+        if (cache.smoothedLabels.size > 24) {
+          cache.smoothedLabels.delete(cache.smoothedLabels.keys().next().value);
+        }
+      }
+      labels = smoothed;
+    }
+
+    paintQuantizedTexture(mat, cache, sourceMap, extractedPalette, labels, plannedSize, rootObject);
   }
 
   return extractedPalette;
+}
+
+let textureProcessingWorker = null;
+let textureProcessingJobId = 0;
+const textureProcessingJobs = new Map();
+
+function resetTextureProcessingWorker(error) {
+  textureProcessingWorker?.terminate?.();
+  textureProcessingWorker = null;
+  for (const job of textureProcessingJobs.values()) job.reject(error);
+  textureProcessingJobs.clear();
+}
+
+function processTextureLabelsOffThread(labels, width, height, numColors, despeckleSize, smoothLevel) {
+  if (typeof Worker === 'undefined') {
+    return Promise.resolve(processTextureLabels(
+      labels.slice(), width, height, numColors, despeckleSize, smoothLevel
+    ));
+  }
+  if (!textureProcessingWorker) {
+    try {
+      textureProcessingWorker = new Worker(
+        new URL('./texture-processing-worker.js', import.meta.url),
+        { type: 'module' }
+      );
+    } catch {
+      return Promise.resolve(processTextureLabels(
+        labels.slice(), width, height, numColors, despeckleSize, smoothLevel
+      ));
+    }
+    textureProcessingWorker.onmessage = event => {
+      const job = textureProcessingJobs.get(event.data.id);
+      if (!job) return;
+      textureProcessingJobs.delete(event.data.id);
+      job.resolve(new Uint8Array(event.data.labels));
+    };
+    textureProcessingWorker.onerror = event => {
+      resetTextureProcessingWorker(new Error(event.message || 'Texture processing worker failed'));
+    };
+  }
+  const id = ++textureProcessingJobId;
+  const copy = labels.slice();
+  return new Promise((resolve, reject) => {
+    textureProcessingJobs.set(id, { resolve, reject });
+    textureProcessingWorker.postMessage({
+      id,
+      labels: copy.buffer,
+      width,
+      height,
+      numColors,
+      despeckleSize,
+      smoothLevel,
+    }, [copy.buffer]);
+  });
+}
+
+/**
+ * Async live quantization variant. Palette discovery and canvas setup stay on
+ * the UI thread, while potentially expensive despeckle/smoothing passes run
+ * in a reusable worker. Its final labels are byte-identical to the synchronous
+ * path and share the same material caches.
+ */
+export async function applyLiveColorQuantizationAsync(
+  rootObject,
+  numColors = 5,
+  enabled = true,
+  customPalette = null,
+  despeckleSize = 0,
+  smoothLevel = 0,
+  forceResample = false,
+  { shouldApply = () => true } = {}
+) {
+  if (!enabled || (despeckleSize <= 0 && smoothLevel <= 0)) {
+    return applyLiveColorQuantization(
+      rootObject, numColors, enabled, customPalette,
+      despeckleSize, smoothLevel, forceResample
+    );
+  }
+
+  const palette = applyLiveColorQuantization(
+    rootObject, numColors, enabled, customPalette,
+    despeckleSize, smoothLevel, forceResample, { prepareOnly: true }
+  );
+  const pendingMaterials = [];
+  rootObject.traverse(child => {
+    if (!child.isMesh || !child.material) return;
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    for (const material of materials) {
+      if (material?._texture2PaintPendingLabels && !pendingMaterials.includes(material)) {
+        pendingMaterials.push(material);
+      }
+    }
+  });
+
+  const results = await Promise.all(pendingMaterials.map(async material => {
+    const pending = material._texture2PaintPendingLabels;
+    const cache = material._texture2PaintTextureCache;
+    const despeckleKey = `${pending.paletteKey}|${pending.despeckleSize}`;
+    const finalKey = `${despeckleKey}|${pending.smoothLevel}`;
+    let labels = pending.smoothLevel > 0
+      ? cache.smoothedLabels.get(finalKey)
+      : cache.despeckledLabels.get(despeckleKey);
+    if (!labels) {
+      try {
+        labels = await processTextureLabelsOffThread(
+          pending.rawLabels,
+          cache.width,
+          cache.height,
+          palette.length,
+          pending.despeckleSize,
+          pending.smoothLevel
+        );
+      } catch {
+        labels = processTextureLabels(
+          pending.rawLabels.slice(),
+          cache.width,
+          cache.height,
+          palette.length,
+          pending.despeckleSize,
+          pending.smoothLevel
+        );
+      }
+      const targetCache = pending.smoothLevel > 0 ? cache.smoothedLabels : cache.despeckledLabels;
+      targetCache.set(pending.smoothLevel > 0 ? finalKey : despeckleKey, labels);
+      const limit = pending.smoothLevel > 0 ? 24 : 12;
+      if (targetCache.size > limit) targetCache.delete(targetCache.keys().next().value);
+    }
+    return { material, pending, cache, labels };
+  }));
+
+  if (!shouldApply()) {
+    for (const { material } of results) material._texture2PaintPendingLabels = null;
+    return palette;
+  }
+  for (const { material, pending, cache, labels } of results) {
+    paintQuantizedTexture(
+      material,
+      cache,
+      material._originalMap,
+      palette,
+      labels,
+      pending.plannedSize,
+      rootObject
+    );
+    material._texture2PaintPendingLabels = null;
+  }
+  return palette;
 }
 
 function getPrusaMmuHex(extruderId) {
@@ -2715,6 +3012,14 @@ function getPrusaMmuHex(extruderId) {
 const PAINT_TRACE_EPSILON = 1e-9;
 const MAX_PAINT_BOUNDARY_SCAN_STEPS = 100000000;
 const MAX_PAINT_BOUNDARY_SEGMENTS = 2000000;
+const MAX_PAINT_OUTPUT_TRIANGLES = 1000000;
+
+export function shouldUseDenseMeshPaintFallback(
+  triangleCount,
+  maxOutputTriangles = MAX_PAINT_OUTPUT_TRIANGLES
+) {
+  return triangleCount >= maxOutputTriangles * 0.75;
+}
 
 function positiveModulo(value, modulus) {
   return ((value % modulus) + modulus) % modulus;
@@ -2833,8 +3138,36 @@ function rasterCellState(raster, cellX, cellY) {
   return alpha < (raster.alphaThreshold ?? 128) ? -1 : raster.labels[pixelIndex];
 }
 
+const rasterBoundaryIndexCache = new WeakMap();
+
+function rasterAlphaSnapshot(raster) {
+  if (!raster.rgba) return null;
+  const alpha = new Uint8Array(raster.width * raster.height);
+  for (let pixel = 0; pixel < alpha.length; pixel++) alpha[pixel] = raster.rgba[pixel * 4 + 3];
+  return alpha;
+}
+
+function equalRasterAlpha(left, right) {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index++) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
 function getRasterBoundaryIndex(raster, traceStats) {
   if (raster.boundaryIndex) return raster.boundaryIndex;
+  const cacheKey = `${raster.width}x${raster.height}|${raster.wrapS}|${raster.wrapT}|${raster.flipY}|${raster.alphaThreshold ?? 128}`;
+  const alphaSnapshot = rasterAlphaSnapshot(raster);
+  const cachedEntries = rasterBoundaryIndexCache.get(raster.labels) || [];
+  const cached = cachedEntries.find(entry =>
+    entry.key === cacheKey && equalRasterAlpha(entry.alpha, alphaSnapshot)
+  );
+  if (cached) {
+    raster.boundaryIndex = cached.index;
+    return cached.index;
+  }
   const xPeriod = rasterWrapPeriod(raster.width, raster.wrapS);
   const yPeriod = rasterWrapPeriod(raster.height, raster.wrapT);
   const xBoundaryCount = xPeriod || raster.width + 1;
@@ -2866,6 +3199,9 @@ function getRasterBoundaryIndex(raster, traceStats) {
     }
   }
   raster.boundaryIndex = { vertical, horizontal, xPeriod, yPeriod };
+  cachedEntries.push({ key: cacheKey, alpha: alphaSnapshot, index: raster.boundaryIndex });
+  if (cachedEntries.length > 4) cachedEntries.shift();
+  rasterBoundaryIndexCache.set(raster.labels, cachedEntries);
   return raster.boundaryIndex;
 }
 
@@ -3819,7 +4155,7 @@ export async function exportMultiColor3MF(
         canvas.height = plannedSize.height;
         const W = canvas.width;
         const H = canvas.height;
-        const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
         ctx.drawImage(img, 0, 0, W, H);
         const imgData = ctx.getImageData(0, 0, W, H);
         const d = imgData.data;
@@ -3844,7 +4180,7 @@ export async function exportMultiColor3MF(
         m._textureProcessingResolution = plannedSize;
       }
 
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const imgData = imageData.data;
       const map = m.map || m._originalMap;
@@ -3958,7 +4294,7 @@ export async function exportMultiColor3MF(
       const canvas = document.createElement('canvas');
       canvas.width = planned.width;
       canvas.height = planned.height;
-      const context = canvas.getContext('2d');
+      const context = canvas.getContext('2d', { willReadFrequently: true });
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
       source = context.getImageData(0, 0, canvas.width, canvas.height).data;
     }
@@ -4128,7 +4464,6 @@ export async function exportMultiColor3MF(
     const kB = getPosKey(pB[0], pB[1], pB[2]);
     return kA < kB ? `${kA}|${kB}` : `${kB}|${kA}`;
   }
-  const MAX_OUTPUT_TRIANGLES = 1000000;
   const numericTolerance = Number(paintResolutionMm);
   const boundaryToleranceMm = Number.isFinite(numericTolerance)
     ? Math.max(0, Math.min(2, numericTolerance))
@@ -4138,6 +4473,7 @@ export async function exportMultiColor3MF(
     boundarySegments: 0,
     degenerateUvTriangles: 0,
     exactFallbackFaces: 0,
+    faceSamplingFallbacks: 0,
   };
   const sharedEdgeSplits = new Map();
   const vertexColoredTriangleCount = initialTriangles.reduce(
@@ -4168,21 +4504,48 @@ export async function exportMultiColor3MF(
     if (Math.abs(x) <= epsilon) registerSharedEdgeSplit(tri.p2, tri.p0, 1 - y);
   }
 
-  for (const tri of initialTriangles) {
-    const exactSegments = traceTextureBoundarySegments(tri, traceStats);
-    exactSegments.push(...traceVertexColorBoundarySegments(tri, traceStats, vertexTraceDivisions));
-    tri.exactPaintBoundarySegments = exactSegments;
-    const simplifiedSegments = simplifyPaintBoundaryNetwork(exactSegments, tri, boundaryToleranceMm);
-    if (boundaryToleranceMm > 0 &&
-      !simplificationPreservesPaint(tri, exactSegments, simplifiedSegments)) {
-      tri.paintBoundarySegments = simplifyPaintBoundaryNetwork(exactSegments, tri, 0);
-      traceStats.exactFallbackFaces++;
-    } else {
-      tri.paintBoundarySegments = simplifiedSegments;
+  // A nearly million-triangle source already provides a much finer paint grid
+  // than a typical sliced print can reproduce. Exact texel-contour splitting
+  // would necessarily exceed the output safety limit, so use those existing
+  // faces as the paint cells instead. This is also the safe retry path for a
+  // pathological raster whose contour graph exceeds the tracing guards.
+  let denseMeshPaintFallback = shouldUseDenseMeshPaintFallback(initialTriangles.length);
+  const tracePaintBoundaries = () => {
+    for (const tri of initialTriangles) {
+      const exactSegments = traceTextureBoundarySegments(tri, traceStats);
+      exactSegments.push(...traceVertexColorBoundarySegments(tri, traceStats, vertexTraceDivisions));
+      tri.exactPaintBoundarySegments = exactSegments;
+      const simplifiedSegments = simplifyPaintBoundaryNetwork(exactSegments, tri, boundaryToleranceMm);
+      if (boundaryToleranceMm > 0 &&
+        !simplificationPreservesPaint(tri, exactSegments, simplifiedSegments)) {
+        tri.paintBoundarySegments = simplifyPaintBoundaryNetwork(exactSegments, tri, 0);
+        traceStats.exactFallbackFaces++;
+      } else {
+        tri.paintBoundarySegments = simplifiedSegments;
+      }
+      for (const segment of tri.paintBoundarySegments) {
+        registerBoundaryPoint(tri, segment[0]);
+        registerBoundaryPoint(tri, segment[1]);
+      }
     }
-    for (const segment of tri.paintBoundarySegments) {
-      registerBoundaryPoint(tri, segment[0]);
-      registerBoundaryPoint(tri, segment[1]);
+  };
+  if (!denseMeshPaintFallback) {
+    try {
+      tracePaintBoundaries();
+    } catch (error) {
+      if (!/too complex to trace safely|too many texels to trace safely/i.test(error?.message || '')) {
+        throw error;
+      }
+      denseMeshPaintFallback = true;
+      sharedEdgeSplits.clear();
+    }
+  }
+  if (denseMeshPaintFallback) {
+    traceStats.faceSamplingFallbacks = initialTriangles.length;
+    traceStats.boundarySegments = 0;
+    for (const tri of initialTriangles) {
+      tri.exactPaintBoundarySegments = [];
+      tri.paintBoundarySegments = [];
     }
   }
 
@@ -4202,6 +4565,25 @@ export async function exportMultiColor3MF(
       sharedEdgeParameters(tri.p1, tri.p2).map(t => [1 - t, t]),
       sharedEdgeParameters(tri.p2, tri.p0).map(t => [0, 1 - t]),
     ];
+  }
+
+  function triangulateBoundaryFan(sourceBoundaryPoints) {
+    const perimeter = [
+      ...sourceBoundaryPoints[0].slice(0, -1),
+      ...sourceBoundaryPoints[1].slice(0, -1),
+      ...sourceBoundaryPoints[2].slice(0, -1),
+    ];
+    const center = [1 / 3, 1 / 3];
+    return perimeter.map((point, index) => {
+      const next = perimeter[(index + 1) % perimeter.length];
+      return {
+        points: [center, point, next],
+        samplePoint: [
+          (center[0] + point[0] + next[0]) / 3,
+          (center[1] + point[1] + next[1]) / 3,
+        ],
+      };
+    });
   }
 
   const currentTriangles = [];
@@ -4243,7 +4625,14 @@ export async function exportMultiColor3MF(
       coveredArea = 0.5;
     }
     if (Math.abs(coveredArea - 0.5) > 1e-7) {
-      throw new Error('A traced texture contour could not be triangulated without gaps. Despeckle or smooth the texture boundary and try again.');
+      // Keep the source face rather than failing the whole export. Boundary
+      // edge splits are retained so adjacent faces remain conforming, while
+      // paint within this numerically pathological face is sampled per region.
+      localTriangles = triangulateBoundaryFan(sourceBoundaryPoints);
+      coveredArea = localTriangles.reduce(
+        (sum, region) => sum + Math.abs(polygonArea2D(region.points)), 0
+      );
+      traceStats.faceSamplingFallbacks++;
     }
 
     for (const regionTriangle of localTriangles) {
@@ -4266,7 +4655,7 @@ export async function exportMultiColor3MF(
         chosenColor: paint.color,
         alpha: paint.alpha,
       });
-      if (currentTriangles.length > MAX_OUTPUT_TRIANGLES) {
+      if (currentTriangles.length > MAX_PAINT_OUTPUT_TRIANGLES) {
         throw new Error('Traced paint mesh exceeds the 1,000,000-triangle safety limit. Increase Boundary Accuracy or despeckle the texture.');
       }
     }
@@ -4330,6 +4719,8 @@ export async function exportMultiColor3MF(
     tracedBoundarySegments: traceStats.boundarySegments,
     degenerateUvTriangles: traceStats.degenerateUvTriangles,
     exactFallbackFaces: traceStats.exactFallbackFaces,
+    faceSamplingFallbacks: traceStats.faceSamplingFallbacks,
+    denseMeshPaintFallback,
     triangleCount: emittedTriangleCount,
   };
 
@@ -4378,11 +4769,20 @@ export async function exportMultiColor3MF(
   <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" />
 </Relationships>`;
 
-  return zipSync({
+  const archiveFiles = {
     '[Content_Types].xml': strToU8(contentTypesXml),
     '_rels/.rels': strToU8(relsXml),
     '3D/3dmodel.model': strToU8(modelXml)
-  }).buffer;
+  };
+  return new Promise(resolve => {
+    try {
+      zip(archiveFiles, (error, archive) => {
+        resolve((error ? zipSync(archiveFiles) : archive).buffer);
+      });
+    } catch {
+      resolve(zipSync(archiveFiles).buffer);
+    }
+  });
 }
 
 function textureHasTransparentPixels(texture) {
@@ -4438,6 +4838,7 @@ export function exportProcessedGlb(model, {
       'specularColorMap', 'specularIntensityMap', 'thicknessMap', 'transmissionMap',
     ];
     const exportScene = model.clone(true);
+    const textureClones = new Map();
     exportScene.traverse(child => {
       if (child.isMesh) {
         child.geometry = child.geometry.clone();
@@ -4451,11 +4852,17 @@ export function exportProcessedGlb(model, {
             }
             for (const slot of textureSlots) {
               if (!cloned[slot]) continue;
-              cloned[slot] = cloned[slot].clone();
-              if (textureMimeType) {
+              const sourceTexture = cloned[slot];
+              if (!textureClones.has(sourceTexture)) {
+                textureClones.set(sourceTexture, sourceTexture.clone());
+              }
+              cloned[slot] = textureClones.get(sourceTexture);
+              const outputMimeType = textureMimeType ||
+                (sourceTexture.userData?.mimeType === 'image/webp' ? 'image/png' : null);
+              if (outputMimeType) {
                 cloned[slot].userData = {
                   ...cloned[slot].userData,
-                  mimeType: textureMimeType,
+                  mimeType: outputMimeType,
                 };
               }
             }
@@ -4988,6 +5395,21 @@ export function repairBufferGeometry(geometry, options = {}) {
     }
   }
 
+  if (options.diagnosticOnly) {
+    return {
+      geometry: null,
+      stats: {
+        weldedVertices: weldedVerticesCount,
+        holesClosed: 0,
+        addedTriangles: 0,
+        openEdgesBefore,
+        openEdgesAfter: openEdgesBefore,
+        isWatertight: openEdgesBefore === 0 && activeTriangles.length > 0,
+        totalTriangles: activeTriangles.length,
+      },
+    };
+  }
+
   // 4. TRACE HOLE BOUNDARY LOOPS
   const boundaryLoops = [];
   const visitedEdges = new Set();
@@ -5301,7 +5723,11 @@ export function analyzeMeshHealth(rootObject, tolerance = 0) {
       totalTriangles += tCount;
 
       // Quick diagnostic run using repairBufferGeometry in dry-run mode
-      const diag = repairBufferGeometry(geo, { tolerance, closeHoles: false });
+      const diag = repairBufferGeometry(geo, {
+        tolerance,
+        closeHoles: false,
+        diagnosticOnly: true,
+      });
       if (diag && diag.stats) {
         openEdgesTotal += diag.stats.openEdgesBefore;
         weldableTotal += diag.stats.weldedVertices;

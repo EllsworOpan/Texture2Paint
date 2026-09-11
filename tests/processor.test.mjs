@@ -4,15 +4,105 @@ import * as THREE from 'three';
 import { strFromU8, unzipSync } from 'fflate';
 import {
   applyLiveColorQuantization,
+  applyLiveColorQuantizationAsync,
   applyUvFlip,
   analyzeModelColorSources,
+  analyzeMeshHealth,
   exportMultiColor3MF,
   exportProcessedGlb,
   extractGlbImages,
   planTextureWorkingSizes,
+  processTextureLabels,
   quantizePaletteFromSamples,
+  repairBufferGeometry,
   sampleModelSurfaceColors,
+  shouldUseDenseMeshPaintFallback,
 } from '../src/processor.js';
+
+test('texture cleanup preserves its exact established label semantics', () => {
+  const source = new Uint8Array([
+    0, 0, 0, 1, 1,
+    0, 2, 0, 1, 1,
+    0, 0, 0, 1, 2,
+    2, 2, 0, 1, 1,
+  ]);
+  assert.deepEqual(
+    [...processTextureLabels(source.slice(), 5, 4, 3, 3, 2)],
+    [
+      0, 0, 0, 1, 1,
+      0, 0, 0, 1, 1,
+      0, 0, 0, 1, 1,
+      0, 0, 0, 1, 1,
+    ]
+  );
+  assert.deepEqual([...source], [
+    0, 0, 0, 1, 1,
+    0, 2, 0, 1, 1,
+    0, 0, 0, 1, 2,
+    2, 2, 0, 1, 1,
+  ]);
+});
+
+test('texture worker produces byte-identical cleanup labels', async () => {
+  const previousSelf = globalThis.self;
+  let workerMessage = null;
+  globalThis.self = {
+    postMessage(message) { workerMessage = message; },
+  };
+  try {
+    await import(`../src/texture-processing-worker.js?test=${Date.now()}`);
+    const source = new Uint8Array(17 * 13);
+    for (let index = 0; index < source.length; index++) {
+      source[index] = ((index * 37) ^ (index >> 2)) % 5;
+    }
+    for (const [despeckleSize, smoothLevel] of [[0, 0], [4, 0], [0, 3], [4, 3]]) {
+      const workerInput = source.slice();
+      globalThis.self.onmessage({ data: {
+        id: 7,
+        labels: workerInput.buffer,
+        width: 17,
+        height: 13,
+        numColors: 5,
+        despeckleSize,
+        smoothLevel,
+      } });
+      const expected = processTextureLabels(
+        source.slice(), 17, 13, 5, despeckleSize, smoothLevel
+      );
+      assert.deepEqual([...new Uint8Array(workerMessage.labels)], [...expected]);
+    }
+  } finally {
+    globalThis.self = previousSelf;
+  }
+});
+
+test('mesh diagnostics match full repair topology statistics', () => {
+  const cases = [
+    { geometry: new THREE.BoxGeometry(), openEdges: 0, welded: 16, watertight: true },
+    { geometry: new THREE.PlaneGeometry(1, 1), openEdges: 4, welded: 0, watertight: false },
+  ];
+  for (const expected of cases) {
+    const root = new THREE.Group();
+    root.add(new THREE.Mesh(expected.geometry));
+    const health = analyzeMeshHealth(root, 0.001);
+    const repair = repairBufferGeometry(expected.geometry, {
+      tolerance: 0.001,
+      closeHoles: false,
+    });
+    assert.equal(health.openEdgesCount, expected.openEdges);
+    assert.equal(health.weldableVertices, expected.welded);
+    assert.equal(health.isWatertight, expected.watertight);
+    assert.equal(health.openEdgesCount, repair.stats.openEdgesBefore);
+    assert.equal(health.weldableVertices, repair.stats.weldedVertices);
+    assert.equal(health.triangles, repair.stats.totalTriangles);
+  }
+});
+
+test('dense source meshes use existing triangles as safe 3MF paint cells', () => {
+  assert.equal(shouldUseDenseMeshPaintFallback(918038), true);
+  assert.equal(shouldUseDenseMeshPaintFallback(749999), false);
+  assert.equal(shouldUseDenseMeshPaintFallback(750000), true);
+});
 
 test('coverage-aware palette preserves a supported chromatic accent among neutral shades', () => {
   const neutralSamples = Array.from({ length: 9900 }, (_, index) => {
@@ -122,6 +212,13 @@ test('live quantization keeps vertex-color base factors and installs palette pre
   material.onBeforeCompile(shader);
   assert.match(shader.fragmentShader, /texture2PaintPalette/);
 
+  const installedShaderHook = material.onBeforeCompile;
+  const materialVersion = material.version;
+  applyLiveColorQuantization(root, 2, true, [[0, 255, 0], [255, 255, 0]]);
+  assert.equal(material.onBeforeCompile, installedShaderHook);
+  assert.equal(material.version, materialVersion);
+  assert.equal(shader.uniforms.texture2PaintPalette.value[0].getHex(), 0x00ff00);
+
   applyLiveColorQuantization(root, 2, false, [[255, 0, 0], [0, 0, 255]]);
   assert.equal(material._vertexQuantizationEnabled, false);
 });
@@ -179,6 +276,7 @@ test('surface color sampling composes texture tint and weights by model area', (
 
 test('live texture quantization bakes the material tint exactly once', () => {
   const originalDocument = globalThis.document;
+  let sourceReads = 0;
   const sourcePixels = new Uint8ClampedArray([
     255, 0, 0, 255,
     0, 0, 255, 255,
@@ -188,7 +286,10 @@ test('live texture quantization bakes the material tint exactly once', () => {
       const canvas = { width: 0, height: 0, pixels: null };
       canvas.getContext = () => ({
         drawImage() {},
-        getImageData: () => ({ data: new Uint8ClampedArray(sourcePixels) }),
+        getImageData: () => {
+          sourceReads++;
+          return { data: new Uint8ClampedArray(sourcePixels) };
+        },
         putImageData: imageData => { canvas.pixels = imageData.data; },
       });
       return canvas;
@@ -212,10 +313,56 @@ test('live texture quantization bakes the material tint exactly once', () => {
       Array.from(material._quantizedCanvas.pixels),
       [128, 0, 0, 255, 0, 0, 128, 255]
     );
+    const generatedTexture = material.map;
+
+    applyLiveColorQuantization(root, 2, true, palette);
+    assert.equal(sourceReads, 1);
+    assert.equal(material.map, generatedTexture);
 
     applyLiveColorQuantization(root, 2, false, palette);
     assert.equal(material.color.getHex(), 0x808080);
     assert.equal(material.map, texture);
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
+test('async texture cleanup preserves synchronous labels and pixels', async () => {
+  const originalDocument = globalThis.document;
+  const sourcePixels = new Uint8ClampedArray([
+    255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+    255, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255,
+    255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+  ]);
+  globalThis.document = {
+    createElement() {
+      const canvas = { width: 0, height: 0, pixels: null };
+      canvas.getContext = () => ({
+        drawImage() {},
+        getImageData: () => ({ data: new Uint8ClampedArray(sourcePixels) }),
+        putImageData: imageData => { canvas.pixels = new Uint8ClampedArray(imageData.data); },
+      });
+      return canvas;
+    },
+  };
+  try {
+    const texture = new THREE.Texture({ width: 3, height: 3 });
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const material = new THREE.MeshBasicMaterial({ color: 0xffffff, map: texture });
+    const root = new THREE.Group();
+    root.add(new THREE.Mesh(new THREE.PlaneGeometry(), material));
+    const palette = [[255, 0, 0], [0, 0, 255]];
+
+    await applyLiveColorQuantizationAsync(root, 2, true, palette, 2, 1);
+
+    const expected = processTextureLabels(
+      new Uint8Array([0, 0, 0, 0, 1, 0, 0, 0, 0]), 3, 3, 2, 2, 1
+    );
+    assert.deepEqual([...material._quantizedLabels], [...expected]);
+    assert.deepEqual(
+      [...material._quantizedCanvas.pixels],
+      Array.from({ length: 9 }, () => [255, 0, 0, 255]).flat()
+    );
   } finally {
     globalThis.document = originalDocument;
   }
@@ -580,6 +727,20 @@ test('3MF boundary accuracy simplifies stair-stepped contours', async () => {
   assert.equal(root._lastPaintBake.boundaryToleranceMm, 1);
 });
 
+test('repeated 3MF export is byte-for-byte deterministic', async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([
+    0, 1,
+    1, 0,
+  ]), 2, 2);
+  const first = new Uint8Array(await exportMultiColor3MF(
+    root, 2, true, 10, false, root._quantizedPalette, 0, 0, 0
+  ));
+  const second = new Uint8Array(await exportMultiColor3MF(
+    root, 2, true, 10, false, root._quantizedPalette, 0, 0, 0
+  ));
+  assert.deepEqual(second, first);
+});
+
 test('3MF boundary simplification falls back when it changes face paint coverage', async () => {
   const width = 64;
   const height = 64;
@@ -859,11 +1020,44 @@ test('processed GLB export applies the requested embedded texture MIME type', as
   assert.equal(exportedScene.children[0].material.map.userData.mimeType, 'image/png');
   assert.equal(texture.userData.mimeType, undefined, 'source texture must remain untouched');
 
+  texture.userData.mimeType = 'image/webp';
+  await exportProcessedGlb(root, { GLTFExporter: FakeExporter, textureFormat: 'automatic' });
+  assert.equal(exportedScene.children[0].material.map.userData.mimeType, 'image/png');
+  assert.equal(texture.userData.mimeType, 'image/webp', 'automatic conversion must not mutate the source');
+
   material.transparent = true;
   await assert.rejects(
     exportProcessedGlb(root, { GLTFExporter: FakeExporter, textureFormat: 'jpeg' }),
     /cannot preserve transparency/i
   );
+});
+
+test('processed GLB export preserves shared packed-texture identity', async () => {
+  let exportedScene = null;
+  class FakeExporter {
+    parse(scene, resolve) {
+      exportedScene = scene;
+      resolve(new ArrayBuffer(8));
+    }
+  }
+  const packedMap = new THREE.Texture({ width: 2048, height: 2048 });
+  packedMap.userData.mimeType = 'image/webp';
+  const material = new THREE.MeshStandardMaterial({
+    metalnessMap: packedMap,
+    roughnessMap: packedMap,
+  });
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(new THREE.BoxGeometry(), material));
+
+  await exportProcessedGlb(root, {
+    GLTFExporter: FakeExporter,
+    textureFormat: 'automatic',
+  });
+
+  const exportedMaterial = exportedScene.children[0].material;
+  assert.equal(exportedMaterial.metalnessMap, exportedMaterial.roughnessMap);
+  assert.notEqual(exportedMaterial.metalnessMap, packedMap);
+  assert.equal(exportedMaterial.metalnessMap.userData.mimeType, 'image/png');
 });
 
 test('extractGlbImages returns empty array on invalid or non-GLB buffers', () => {

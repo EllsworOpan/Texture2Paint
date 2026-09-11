@@ -191,7 +191,14 @@ test('generic geometry analysis identifies Link eye and brow sheets without hard
 
 test('processing clones isolate geometry and materials from the source document', () => {
   const source = new THREE.Group();
-  source.add(new THREE.Mesh(new THREE.PlaneGeometry(), new THREE.MeshBasicMaterial()));
+  const sharedPackedMap = new THREE.Texture({ width: 1, height: 1 });
+  source.add(new THREE.Mesh(
+    new THREE.PlaneGeometry(),
+    new THREE.MeshStandardMaterial({
+      roughnessMap: sharedPackedMap,
+      metalnessMap: sharedPackedMap,
+    })
+  ));
   canonicalizeModel(source);
   const clone = cloneModelForProcessing(source);
   const sourceMesh = source.children.find(child => child.isMesh);
@@ -199,6 +206,8 @@ test('processing clones isolate geometry and materials from the source document'
 
   assert.notEqual(clonedMesh.geometry, sourceMesh.geometry);
   assert.notEqual(clonedMesh.material, sourceMesh.material);
+  assert.notEqual(clonedMesh.material.roughnessMap, sharedPackedMap);
+  assert.equal(clonedMesh.material.roughnessMap, clonedMesh.material.metalnessMap);
   clonedMesh.geometry.attributes.position.setX(0, 999);
   clonedMesh.material.color.setHex(0xff00ff);
   assert.notEqual(sourceMesh.geometry.attributes.position.getX(0), 999);

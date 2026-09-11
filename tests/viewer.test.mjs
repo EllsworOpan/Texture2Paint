@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { Viewer } from '../src/viewer.js';
+import { Viewer, disposeModelResources } from '../src/viewer.js';
 
 function testViewer(root) {
   const viewer = Object.create(Viewer.prototype);
@@ -96,4 +96,56 @@ test('export copies restore display-only material effects without changing the p
   assert.equal(material.metalness, 0);
   assert.equal(exportMaterial.roughness, 0.2);
   assert.equal(exportMaterial.metalness, 0.9);
+});
+
+test('print-color export copies keep the compact matte preview state', () => {
+  const normalMap = new THREE.Texture({ width: 1024, height: 1024 });
+  const roughnessMap = new THREE.Texture({ width: 1024, height: 1024 });
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x336699,
+    normalMap,
+    roughnessMap,
+    metalness: 0.8,
+  });
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(new THREE.BoxGeometry(), material));
+  const viewer = testViewer(root);
+  viewer.setMaterialEffects(false);
+
+  const exportMaterial = viewer.createExportObject({
+    restoreMaterialEffects: false,
+  }).children[0].material;
+
+  assert.equal(exportMaterial.normalMap, null);
+  assert.equal(exportMaterial.roughnessMap, null);
+  assert.equal(exportMaterial.metalness, 0);
+  assert.equal(material.normalMap, null);
+  assert.equal(viewer._materialEffectStates.get(material).values.normalMap, normalMap);
+});
+
+test('superseded model resources are disposed exactly once', () => {
+  const texture = new THREE.Texture({ width: 1, height: 1 });
+  const originalTexture = new THREE.Texture({ width: 1, height: 1 });
+  const material = new THREE.MeshBasicMaterial({ map: texture });
+  material._originalMap = originalTexture;
+  const geometry = new THREE.BoxGeometry();
+  const root = new THREE.Group();
+  root.add(
+    new THREE.Mesh(geometry, material),
+    new THREE.Mesh(geometry, material)
+  );
+  let geometryDisposals = 0;
+  let materialDisposals = 0;
+  let textureDisposals = 0;
+  let originalTextureDisposals = 0;
+  geometry.dispose = () => geometryDisposals++;
+  material.dispose = () => materialDisposals++;
+  texture.dispose = () => textureDisposals++;
+  originalTexture.dispose = () => originalTextureDisposals++;
+
+  disposeModelResources(root);
+  assert.equal(geometryDisposals, 1);
+  assert.equal(materialDisposals, 1);
+  assert.equal(textureDisposals, 1);
+  assert.equal(originalTextureDisposals, 1);
 });

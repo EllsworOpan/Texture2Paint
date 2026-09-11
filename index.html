@@ -1495,7 +1495,7 @@
             <span class="proc-label-with-help">
               <label for="proc-texture-format" class="proc-tag">Texture Encoding</label>
               <button class="proc-help" type="button" aria-label="About texture encoding" aria-expanded="false"
-                aria-describedby="proc-tooltip" data-help="Automatic keeps compatible JPEG/PNG encodings and converts WebP when needed. PNG and JPEG force re-encoding for tools such as DitherForge, DCC apps, and game engines; JPEG is unavailable when it would discard transparency.">i</button>
+                aria-describedby="proc-tooltip" data-help="Automatic keeps compatible JPEG/PNG encodings and converts WebP when needed. Quantized GLBs match the matte print preview and omit normal/metal/roughness maps that DitherForge does not use. PNG and JPEG force the remaining texture encoding; JPEG is unavailable when it would discard transparency.">i</button>
             </span>
             <span class="proc-tag">Export Compatibility</span>
           </div>
@@ -1709,13 +1709,13 @@
     import * as THREE from 'three';
     import { meshyToGlb, isMeshyFile, isGlbFile } from './src/decrypt.js';
     import { decompressGlb } from './src/decompress.js';
-    import { Viewer } from './src/viewer.js';
+    import { Viewer, disposeModelResources } from './src/viewer.js';
     import {
       canonicalizeModel,
       cloneModelForProcessing,
       analyzeFloatingDecals,
       bakeFloatingDecals,
-      applyLiveColorQuantization,
+      applyLiveColorQuantizationAsync,
       exportMultiColor3MF,
       exportProcessedGlb,
       analyzeModelColorSources,
@@ -1909,7 +1909,51 @@
     let sourceModelDocument = null;
     let decalAnalysis = { components: [], candidates: [] };
     let rebuildRevision = 0;
+    let sourceRevision = 0;
+    let activeStructuralKey = null;
+    let activeStructuralResults = { decalResult: null, repairResult: null };
+    const decalStageCache = new Map();
+    const repairStageCache = new Map();
+    const meshHealthCache = new Map();
     let materialEffectsPreference = true;
+
+    function disposeStageCache(cache) {
+      for (const entry of cache.values()) disposeModelResources(entry.model);
+      cache.clear();
+    }
+
+    function clearProcessingCaches() {
+      rebuildRevision++;
+      clearTimeout(quantizeTimer);
+      clearTimeout(repairTimer);
+      clearTimeout(decalSettingsTimer);
+      disposeStageCache(decalStageCache);
+      disposeStageCache(repairStageCache);
+      meshHealthCache.clear();
+      activeStructuralKey = null;
+      activeStructuralResults = { decalResult: null, repairResult: null };
+    }
+
+    function cacheStage(cache, key, model, result, limit = 2) {
+      const previous = cache.get(key);
+      if (previous) disposeModelResources(previous.model);
+      cache.delete(key);
+      cache.set(key, { model: cloneModelForProcessing(model), result });
+      while (cache.size > limit) {
+        const oldestKey = cache.keys().next().value;
+        const oldest = cache.get(oldestKey);
+        disposeModelResources(oldest.model);
+        cache.delete(oldestKey);
+      }
+    }
+
+    function cloneCachedStage(cache, key) {
+      const entry = cache.get(key);
+      if (!entry) return null;
+      cache.delete(key);
+      cache.set(key, entry);
+      return { model: cloneModelForProcessing(entry.model), result: entry.result };
+    }
 
     function syncMaterialEffects() {
       const forcedOff = $quantizeToggle.checked;
@@ -2271,34 +2315,96 @@
       syncDependentControls($decalBakeToggle);
     }
 
-    async function rebuildProcessedModel({ forceResample = false, reason = '' } = {}) {
-      if (!sourceModelDocument) return null;
-      const revision = ++rebuildRevision;
-      const nextModel = cloneModelForProcessing(sourceModelDocument);
+    function currentStructuralSettings() {
+      const mappings = $decalBakeToggle.checked ? selectedDecalMappings() : [];
+      const decal = $decalBakeToggle.checked && mappings.length > 0 ? {
+        mappings: mappings.map(({ sourceId, receiverId, mode }) => ({ sourceId, receiverId, mode })),
+        alphaThreshold: parseFloat($procAlphaSlider.value || '0.5'),
+        projectionMode: $decalMode.value,
+      } : null;
+      const repair = $procRepairToggle.checked ? {
+        tolerance: parseFloat($weldNum.value || '0.001'),
+        closeHoles: $procCloseHoles.checked,
+        joinSubmeshes: $procJoinSubmeshes.checked,
+      } : null;
+      const decalKey = JSON.stringify({ sourceRevision, decal });
+      return {
+        decal,
+        repair,
+        decalKey,
+        key: JSON.stringify({ decalKey, repair }),
+      };
+    }
 
+    async function buildStructuralModel(settings, revision) {
+      let nextModel;
       let decalResult = null;
-      if ($decalBakeToggle.checked) {
-        const mappings = selectedDecalMappings();
-        $decalBakeBadge.textContent = mappings.length ? 'BAKING' : 'NONE SELECTED';
-        $decalBakeBadge.className = 'status-badge badge-warn';
-        if (mappings.length) {
-          decalResult = await bakeFloatingDecals(nextModel, mappings, {
-            alphaThreshold: parseFloat($procAlphaSlider.value || '0.5'),
+      if (settings.decal) {
+        const cached = cloneCachedStage(decalStageCache, settings.decalKey);
+        if (cached) {
+          nextModel = cached.model;
+          decalResult = cached.result;
+        } else {
+          nextModel = cloneModelForProcessing(sourceModelDocument);
+          $decalBakeBadge.textContent = 'BAKING';
+          $decalBakeBadge.className = 'status-badge badge-warn';
+          decalResult = await bakeFloatingDecals(nextModel, settings.decal.mappings, {
+            alphaThreshold: settings.decal.alphaThreshold,
             alphaCutout: true,
-            projectionMode: $decalMode.value,
+            projectionMode: settings.decal.projectionMode,
           });
+          if (revision !== rebuildRevision) {
+            disposeModelResources(nextModel);
+            return null;
+          }
+          cacheStage(decalStageCache, settings.decalKey, nextModel, decalResult);
         }
+      } else {
+        nextModel = cloneModelForProcessing(sourceModelDocument);
       }
-      if (revision !== rebuildRevision) return null;
 
       let repairResult = null;
-      if ($procRepairToggle.checked) {
-        repairResult = applyLiveMeshRepair(nextModel, {
-          enabled: true,
-          tolerance: parseFloat($weldNum.value || '0.001'),
-          closeHoles: $procCloseHoles.checked,
-          joinSubmeshes: $procJoinSubmeshes.checked,
-        });
+      if (settings.repair) {
+        const cached = cloneCachedStage(repairStageCache, settings.key);
+        if (cached) {
+          disposeModelResources(nextModel);
+          nextModel = cached.model;
+          repairResult = cached.result;
+        } else {
+          repairResult = applyLiveMeshRepair(nextModel, {
+            enabled: true,
+            ...settings.repair,
+          });
+          cacheStage(repairStageCache, settings.key, nextModel, repairResult);
+        }
+      }
+      nextModel._texture2PaintProcessingRevision = settings.key;
+      return { model: nextModel, decalResult, repairResult };
+    }
+
+    async function rebuildProcessedModel({
+      forceResample = false,
+      forceStructural = false,
+      renderPalette = true,
+      reason = '',
+    } = {}) {
+      if (!sourceModelDocument) return null;
+      const revision = ++rebuildRevision;
+      const settings = currentStructuralSettings();
+      const structuralChanged = forceStructural || settings.key !== activeStructuralKey || !viewer.currentModel;
+      let nextModel = viewer.currentModel;
+      let { decalResult, repairResult } = activeStructuralResults;
+
+      if (structuralChanged) {
+        const built = await buildStructuralModel(settings, revision);
+        if (!built) return null;
+        nextModel = built.model;
+        decalResult = built.decalResult;
+        repairResult = built.repairResult;
+      }
+      if (revision !== rebuildRevision) {
+        if (structuralChanged) disposeModelResources(nextModel);
+        return null;
       }
 
       const enabled = $quantizeToggle.checked;
@@ -2306,23 +2412,32 @@
       const despeckleSize = parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10);
       const smoothLevel = parseInt($smoothSlider.value || '0', 10);
       if (forceResample) activePalette = [];
-      activePalette = applyLiveColorQuantization(
+      activePalette = await applyLiveColorQuantizationAsync(
         nextModel,
         numColors,
         enabled,
         (!forceResample && activePalette.length > 0) ? activePalette : null,
         despeckleSize,
         smoothLevel,
-        forceResample
+        forceResample,
+        { shouldApply: () => revision === rebuildRevision }
       );
-      if (revision !== rebuildRevision) return null;
+      if (revision !== rebuildRevision) {
+        if (structuralChanged) disposeModelResources(nextModel);
+        return null;
+      }
 
-      const { triangles } = viewer.replaceObject(nextModel, { frame: false, uvFlipped: false });
+      let triangles = viewer.countTriangles(nextModel);
+      if (structuralChanged) {
+        ({ triangles } = viewer.replaceObject(nextModel, { frame: false, uvFlipped: false }));
+        activeStructuralKey = settings.key;
+        activeStructuralResults = { decalResult, repairResult };
+        updateMeshDiagnostics();
+      }
       updateInfoDisplay(triangles);
       updateTextureListUI();
-      renderSwatches(activePalette);
+      if (renderPalette) renderSwatches(activePalette);
       syncDependentControls($quantizeToggle);
-      updateMeshDiagnostics();
 
       if ($decalBakeToggle.checked) {
         const baked = decalResult?.baked || 0;
@@ -2398,7 +2513,11 @@
         if (!colorSources.hasAuthoredColor) {
           throw new Error('This model has no authored texture, vertex color, or material color to convert.');
         }
+        clearProcessingCaches();
+        disposeModelResources(sourceModelDocument);
+        sourceModelDocument = null;
         const { triangles } = viewer.loadObject(loaded.object);
+        sourceRevision++;
         sourceModelDocument = cloneModelForProcessing(viewer.currentModel);
         revokeUrls(lastResourceUrls);
         lastResourceUrls = resources.urls;
@@ -2415,21 +2534,24 @@
         $decalMode.value = 'auto';
         decalAnalysis = analyzeFloatingDecals(sourceModelDocument);
         renderDecalCandidates();
+        const initialSettings = currentStructuralSettings();
+        if (!$procRepairToggle.checked) {
+          activeStructuralKey = initialSettings.key;
+          viewer.currentModel._texture2PaintProcessingRevision = initialSettings.key;
+        }
         $procBadge.textContent = lastLoadedFormat;
         updateTextureListUI();
         $procToolbar.classList.add('show');
         $procBtn.setAttribute('aria-expanded', 'true');
         syncAllDependentControls();
 
-        // Analyze mesh health and apply repair if toggle is active
-        updateMeshDiagnostics();
-        if ($procRepairToggle.checked) {
-          updateMeshRepair(false);
-        }
+        // Analyze once for this structural model; repaired models are analyzed
+        // after the repaired stage replaces the viewport object.
+        if (!$procRepairToggle.checked) updateMeshDiagnostics();
 
         // Initialize palette and swatches immediately on file load
         activePalette = [];
-        updateQuantization(false);
+        updateQuantization(false, { forceStructural: $procRepairToggle.checked });
       } catch (err) {
         revokeUrls(resources.urls);
         throw err;
@@ -2540,6 +2662,10 @@
         const bake = viewer.currentModel._lastPaintBake;
         if (bake?.refinementLimited) {
           toast(`Paint bake reached its ${bake.triangleCount.toLocaleString()}-triangle safety limit; use a larger Boundary Accuracy value for a complete bake.`, 'work', 5000);
+        } else if (bake?.denseMeshPaintFallback) {
+          toast(`Paint was assigned across the model's ${bake.triangleCount.toLocaleString()} existing fine triangles to stay within the 3MF safety limit.`, 'ok', 5000);
+        } else if (bake?.faceSamplingFallbacks) {
+          toast(`${bake.faceSamplingFallbacks.toLocaleString()} numerically complex paint face${bake.faceSamplingFallbacks === 1 ? '' : 's'} used safe per-face sampling.`, 'work', 5000);
         }
         return {
           data,
@@ -2549,7 +2675,12 @@
       }
 
       if (format === 'glb') {
-        const data = await exportProcessedGlb(viewer.createExportObject(), {
+        const data = await exportProcessedGlb(viewer.createExportObject({
+          // Quantized GLBs are print-color interchange files. Keep the matte
+          // preview state so normal/metal/roughness maps are not needlessly
+          // re-encoded and embedded for DitherForge.
+          restoreMaterialEffects: !$quantizeToggle.checked,
+        }), {
           GLTFExporter,
           textureFormat: $procFormat.value,
         });
@@ -2631,7 +2762,7 @@
           const b = parseInt(newHex.slice(5, 7), 16);
           activePalette[idx] = [r, g, b];
 
-          rebuildProcessedModel();
+          updateQuantization(false, { renderPalette: false });
         });
 
         label.appendChild(picker);
@@ -2640,7 +2771,7 @@
     }
 
     let quantizeTimer;
-    function updateQuantization(forceResample = false) {
+    function updateQuantization(forceResample = false, options = {}) {
       clearTimeout(quantizeTimer);
       quantizeTimer = setTimeout(async () => {
         const enabled = $quantizeToggle.checked;
@@ -2654,8 +2785,8 @@
         $despeckleBadge.textContent = despeckleSize === 0 ? '0 px (Off)' : `${despeckleSize} px`;
         $smoothBadge.textContent = smoothLevel === 0 ? 'Off' : `Level ${smoothLevel}`;
 
-        await rebuildProcessedModel({ forceResample });
-      }, 30);
+        await rebuildProcessedModel({ ...options, forceResample });
+      }, 120);
     }
 
     // Dedicated Resample button: recompute the palette from the current model.
@@ -2713,11 +2844,15 @@
     });
 
     // Transparent decal cutout is always enabled; only its threshold is adjustable.
+    let decalSettingsTimer;
     $procAlphaSlider.addEventListener('input', e => {
       const val = parseFloat(e.target.value);
       $alphaSliderBadge.textContent = val.toFixed(2);
       viewer.setAlphaTest(val);
-      if ($decalBakeToggle.checked) rebuildProcessedModel();
+      if ($decalBakeToggle.checked) {
+        clearTimeout(decalSettingsTimer);
+        decalSettingsTimer = setTimeout(() => rebuildProcessedModel(), 120);
+      }
     });
 
     $decalBakeToggle.addEventListener('change', () => {
@@ -2733,7 +2868,7 @@
 
     // ── Mesh Repair & Sealing Logic ──────────────────────────────────────────
 
-    function updateMeshDiagnostics() {
+    function updateMeshDiagnostics(force = false) {
       if (!viewer.currentModel) {
         $diagStatus.textContent = '● No model loaded';
         $diagStatus.className = 'repair-diag-status';
@@ -2744,7 +2879,14 @@
         return;
       }
       const tol = parseFloat($weldNum.value || '0.001');
-      const health = analyzeMeshHealth(viewer.currentModel, tol);
+      const cacheKey = `${activeStructuralKey || viewer.currentModel.uuid}|${tol}`;
+      if (force) meshHealthCache.delete(cacheKey);
+      let health = meshHealthCache.get(cacheKey);
+      if (!health) {
+        health = analyzeMeshHealth(viewer.currentModel, tol);
+        meshHealthCache.set(cacheKey, health);
+        if (meshHealthCache.size > 8) meshHealthCache.delete(meshHealthCache.keys().next().value);
+      }
 
       $diagOpenEdges.textContent = health.openEdgesCount.toLocaleString();
       $diagHoles.textContent = health.holesCount.toLocaleString();
@@ -2777,7 +2919,7 @@
             ? ($procRepairToggle.checked ? 'Rebuilt the model with mesh repair' : 'Restored the unrepaired model')
             : ''
         });
-      }, 30);
+      }, 120);
     }
 
     $procRepairToggle.addEventListener('change', () => {
@@ -2808,7 +2950,7 @@
     });
 
     $reanalyzeBtn.addEventListener('click', () => {
-      updateMeshDiagnostics();
+      updateMeshDiagnostics(true);
       toast('Mesh geometry inspected', 'ok', 1500);
     });
 

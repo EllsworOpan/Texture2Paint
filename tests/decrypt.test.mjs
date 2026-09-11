@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { meshyToGlb, isMeshyFile, isGlbFile } from '../src/decrypt.js';
@@ -26,6 +26,7 @@ function locateFixtures() {
   const candidates = [
     process.env.MESHY_FIXTURES,
     resolve(here, 'fixtures'),
+    resolve(here, '../examples'),
     '/Users/amal/Downloads',
     '/Users/amal/listenowl/experiments/meshy-viewer',
   ].filter(Boolean);
@@ -77,7 +78,7 @@ if (fixtures.length === 0) {
   test('fixture-driven tests (skipped: no .meshy fixtures found)', { skip: true }, () => {});
 } else {
   for (const path of fixtures) {
-    const name = path.split('/').pop();
+    const name = basename(path);
     test(`decode: ${name}`, async () => {
       const meshyBuf = readFileSync(path).buffer;
       const glb = await meshyToGlb(meshyBuf);

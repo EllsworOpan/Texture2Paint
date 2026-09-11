@@ -50,6 +50,40 @@ function restoreMaterialEffectState(material, state) {
   material.needsUpdate = true;
 }
 
+const MODEL_TEXTURE_SLOTS = [
+  'map', 'alphaMap', 'aoMap', 'bumpMap', 'normalMap', 'displacementMap',
+  'emissiveMap', 'metalnessMap', 'roughnessMap', 'clearcoatMap',
+  'clearcoatNormalMap', 'clearcoatRoughnessMap', 'iridescenceMap',
+  'iridescenceThicknessMap', 'sheenColorMap', 'sheenRoughnessMap',
+  'specularColorMap', 'specularIntensityMap', 'thicknessMap', 'transmissionMap',
+];
+
+export function disposeModelResources(rootObject) {
+  if (!rootObject) return;
+  const geometries = new Set();
+  const materials = new Set();
+  const textures = new Set();
+  rootObject.traverse(object => {
+    if (!object.isMesh) return;
+    if (object.geometry) geometries.add(object.geometry);
+    const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of objectMaterials) {
+      if (!material) continue;
+      materials.add(material);
+      for (const slot of MODEL_TEXTURE_SLOTS) {
+        if (material[slot]) textures.add(material[slot]);
+      }
+      if (material._originalMap) textures.add(material._originalMap);
+      if (material._texture2PaintTextureCache?.texture) {
+        textures.add(material._texture2PaintTextureCache.texture);
+      }
+    }
+  });
+  for (const geometry of geometries) geometry.dispose?.();
+  for (const texture of textures) texture.dispose?.();
+  for (const material of materials) material.dispose?.();
+}
+
 export class Viewer {
   constructor({ container = document.body, background = 0x1a1a2e } = {}) {
     this.container = container;
@@ -279,7 +313,7 @@ export class Viewer {
   }
 
   /** Creates an export copy without display-only matte overrides. */
-  createExportObject() {
+  createExportObject({ restoreMaterialEffects = true } = {}) {
     if (!this.currentModel) return null;
     const clone = this.currentModel.clone(true);
     const sourceMeshes = [];
@@ -289,12 +323,14 @@ export class Viewer {
     for (let index = 0; index < sourceMeshes.length; index++) {
       const source = sourceMeshes[index];
       const target = clonedMeshes[index];
-      const cloneMaterial = material => {
-        if (!material) return material;
-        const copy = material.clone();
-        restoreMaterialEffectState(copy, this._materialEffectStates.get(material));
-        copy.envMapIntensity = this._envIntensity;
-        return copy;
+        const cloneMaterial = material => {
+          if (!material) return material;
+          const copy = material.clone();
+          if (restoreMaterialEffects) {
+            restoreMaterialEffectState(copy, this._materialEffectStates.get(material));
+            copy.envMapIntensity = this._envIntensity;
+          }
+          return copy;
       };
       target.material = Array.isArray(source.material)
         ? source.material.map(cloneMaterial)
@@ -310,8 +346,17 @@ export class Viewer {
   }
 
   /** Replaces the visible model without resetting the processing controls. */
-  replaceObject(object, { frame = false, uvFlipped = this._isUvFlipped } = {}) {
-    if (this.currentModel) this.scene.remove(this.currentModel);
+  replaceObject(object, {
+    frame = false,
+    uvFlipped = this._isUvFlipped,
+    disposePrevious = true,
+  } = {}) {
+    if (this.currentModel) {
+      this.scene.remove(this.currentModel);
+      if (disposePrevious && this.currentModel !== object) {
+        disposeModelResources(this.currentModel);
+      }
+    }
     this.currentModel = object;
     this._isUvFlipped = Boolean(uvFlipped);
     this._applyMaterialSettings(this.currentModel);
