@@ -4,6 +4,52 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { applyUvFlip, getModelTextures } from './processor.js';
 
+const MATTE_MATERIAL_OVERRIDES = {
+  metalness: 0,
+  roughness: 1,
+  metalnessMap: null,
+  roughnessMap: null,
+  normalMap: null,
+  bumpMap: null,
+  displacementMap: null,
+  aoMap: null,
+  clearcoat: 0,
+  clearcoatMap: null,
+  clearcoatNormalMap: null,
+  clearcoatRoughnessMap: null,
+  sheen: 0,
+  sheenColorMap: null,
+  sheenRoughnessMap: null,
+  iridescence: 0,
+  iridescenceMap: null,
+  iridescenceThicknessMap: null,
+  transmission: 0,
+  transmissionMap: null,
+  thickness: 0,
+  thicknessMap: null,
+  specularIntensity: 0,
+  specularIntensityMap: null,
+  specularColorMap: null,
+  shininess: 0,
+  emissiveIntensity: 0,
+  emissiveMap: null,
+};
+
+function copyMaterialValue(value) {
+  return value?.isColor ? value.clone() : value;
+}
+
+function restoreMaterialEffectState(material, state) {
+  if (!state) return;
+  for (const [property, value] of Object.entries(state.values)) {
+    if (value?.isColor && material[property]?.isColor) material[property].copy(value);
+    else material[property] = value;
+  }
+  if (state.specular && material.specular?.isColor) material.specular.copy(state.specular);
+  if (state.emissive && material.emissive?.isColor) material.emissive.copy(state.emissive);
+  material.needsUpdate = true;
+}
+
 export class Viewer {
   constructor({ container = document.body, background = 0x1a1a2e } = {}) {
     this.container = container;
@@ -38,6 +84,8 @@ export class Viewer {
     this.scene.add(this._dirLight);
 
     this._wireframe = false;
+    this._materialEffects = true;
+    this._materialEffectStates = new WeakMap();
     this._isUvFlipped = false;
     this._alphaCutout = true;
     this._alphaTest = 0.5;
@@ -85,14 +133,7 @@ export class Viewer {
 
   setEnvIntensity(v) {
     this._envIntensity = v;
-    if (this.currentModel) {
-      this.currentModel.traverse(o => {
-        if (o.isMesh && o.material) {
-          const mats = Array.isArray(o.material) ? o.material : [o.material];
-          for (const m of mats) m.envMapIntensity = v;
-        }
-      });
-    }
+    this.applyMaterialSettings();
   }
 
   setDirectLight(v) {
@@ -123,6 +164,45 @@ export class Viewer {
     }
   }
 
+  _setMaterialEffectsOnMaterial(material) {
+    const saved = this._materialEffectStates.get(material);
+    if (this._materialEffects) {
+      if (saved) {
+        restoreMaterialEffectState(material, saved);
+        this._materialEffectStates.delete(material);
+      }
+      return;
+    }
+
+    if (!saved) {
+      const values = {};
+      for (const property of Object.keys(MATTE_MATERIAL_OVERRIDES)) {
+        if (property in material) values[property] = copyMaterialValue(material[property]);
+      }
+      this._materialEffectStates.set(material, {
+        values,
+        specular: material.specular?.isColor ? material.specular.clone() : null,
+        emissive: material.emissive?.isColor ? material.emissive.clone() : null,
+      });
+    }
+
+    for (const [property, value] of Object.entries(MATTE_MATERIAL_OVERRIDES)) {
+      if (property in material) material[property] = value;
+    }
+    if (material.specular?.isColor) material.specular.set(0x000000);
+    if (material.emissive?.isColor) material.emissive.set(0x000000);
+    material.needsUpdate = true;
+  }
+
+  setMaterialEffects(enabled) {
+    this._materialEffects = Boolean(enabled);
+    this.applyMaterialSettings();
+  }
+
+  areMaterialEffectsEnabled() {
+    return this._materialEffects;
+  }
+
   resetCamera() {
     if (this.currentModel) this._frame(this.currentModel);
   }
@@ -150,7 +230,8 @@ export class Viewer {
       if (o.isMesh && o.material) {
         const materials = Array.isArray(o.material) ? o.material : [o.material];
         for (const material of materials) {
-          material.envMapIntensity = this._envIntensity;
+          this._setMaterialEffectsOnMaterial(material);
+          material.envMapIntensity = this._materialEffects ? this._envIntensity : 0;
           material.wireframe = this._wireframe;
 
           // Configure alpha testing, depth write, and polygon offset for overlayed decals
@@ -195,6 +276,31 @@ export class Viewer {
 
   getTextures() {
     return getModelTextures(this.currentModel);
+  }
+
+  /** Creates an export copy without display-only matte overrides. */
+  createExportObject() {
+    if (!this.currentModel) return null;
+    const clone = this.currentModel.clone(true);
+    const sourceMeshes = [];
+    const clonedMeshes = [];
+    this.currentModel.traverse(object => { if (object.isMesh) sourceMeshes.push(object); });
+    clone.traverse(object => { if (object.isMesh) clonedMeshes.push(object); });
+    for (let index = 0; index < sourceMeshes.length; index++) {
+      const source = sourceMeshes[index];
+      const target = clonedMeshes[index];
+      const cloneMaterial = material => {
+        if (!material) return material;
+        const copy = material.clone();
+        restoreMaterialEffectState(copy, this._materialEffectStates.get(material));
+        copy.envMapIntensity = this._envIntensity;
+        return copy;
+      };
+      target.material = Array.isArray(source.material)
+        ? source.material.map(cloneMaterial)
+        : cloneMaterial(source.material);
+    }
+    return clone;
   }
 
   loadObject(object) {

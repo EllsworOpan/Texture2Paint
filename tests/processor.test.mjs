@@ -3,11 +3,121 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { strFromU8, unzipSync } from 'fflate';
 import {
+  applyLiveColorQuantization,
   applyUvFlip,
   exportMultiColor3MF,
   extractGlbImages,
   planTextureWorkingSizes,
+  sampleModelSurfaceColors,
 } from '../src/processor.js';
+
+test('live quantization supports models made only from solid material colors', () => {
+  const sourceHexes = [0x731f1f, 0x777777, 0x000000, 0x96786b, 0x4e4e4e, 0xffffff];
+  const root = new THREE.Group();
+  for (const hex of sourceHexes) {
+    root.add(new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshBasicMaterial({ color: hex })
+    ));
+  }
+
+  const palette = applyLiveColorQuantization(
+    root, 5, true, [[0, 0, 0], [255, 255, 255]]
+  );
+
+  assert.equal(palette.length, 5);
+  assert.ok(palette.some(([r, g, b]) => r !== g || g !== b));
+  assert.ok(root.children.every(mesh => mesh.material._quantizationEnabled));
+
+  applyLiveColorQuantization(root, 5, false, palette);
+  assert.deepEqual(
+    root.children.map(mesh => mesh.material.color.getHex()),
+    sourceHexes
+  );
+});
+
+test('surface color sampling composes texture tint and weights by model area', () => {
+  const texture = new THREE.DataTexture(
+    new Uint8Array([
+      255, 0, 0, 255,
+      0, 0, 255, 255,
+    ]),
+    2,
+    1,
+    THREE.RGBAFormat
+  );
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.flipY = false;
+
+  const textured = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({ color: 0x808080, map: texture })
+  );
+  const solid = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+  );
+  solid.scale.set(2, 2, 2);
+  const root = new THREE.Group();
+  root.add(textured, solid);
+
+  const samples = sampleModelSurfaceColors(root, {
+    maxSamples: 1000,
+    minSamplesPerMaterial: 0,
+  });
+  const greenSamples = samples.filter(([r, g, b]) => r === 0 && g === 255 && b === 0);
+  const tintedTextureSamples = samples.filter(([r, g, b]) =>
+    (r === 128 && g === 0 && b === 0) || (r === 0 && g === 0 && b === 128)
+  );
+
+  assert.equal(samples.length, 1000);
+  assert.equal(greenSamples.length, 800);
+  assert.equal(tintedTextureSamples.length, 200);
+});
+
+test('live texture quantization bakes the material tint exactly once', () => {
+  const originalDocument = globalThis.document;
+  const sourcePixels = new Uint8ClampedArray([
+    255, 0, 0, 255,
+    0, 0, 255, 255,
+  ]);
+  globalThis.document = {
+    createElement() {
+      const canvas = { width: 0, height: 0, pixels: null };
+      canvas.getContext = () => ({
+        drawImage() {},
+        getImageData: () => ({ data: new Uint8ClampedArray(sourcePixels) }),
+        putImageData: imageData => { canvas.pixels = imageData.data; },
+      });
+      return canvas;
+    },
+  };
+
+  try {
+    const sourceImage = { width: 2, height: 1 };
+    const texture = new THREE.Texture(sourceImage);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.flipY = false;
+    const material = new THREE.MeshBasicMaterial({ color: 0x808080, map: texture });
+    const root = new THREE.Group();
+    root.add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material));
+    const palette = [[128, 0, 0], [0, 0, 128]];
+
+    applyLiveColorQuantization(root, 2, true, palette);
+
+    assert.equal(material.color.getHex(), 0xffffff);
+    assert.deepEqual(
+      Array.from(material._quantizedCanvas.pixels),
+      [128, 0, 0, 255, 0, 0, 128, 255]
+    );
+
+    applyLiveColorQuantization(root, 2, false, palette);
+    assert.equal(material.color.getHex(), 0x808080);
+    assert.equal(material.map, texture);
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
 
 function createQuantizedMaterial(labels, width, height) {
   const rgba = new Uint8ClampedArray(width * height * 4);

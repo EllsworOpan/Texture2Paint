@@ -474,6 +474,17 @@
       color: var(--accent);
     }
 
+    .chip.auto-off {
+      cursor: not-allowed;
+      opacity: .65;
+    }
+
+    .chip.auto-off::after {
+      content: ' · AUTO OFF';
+      font-size: 9px;
+      letter-spacing: .03em;
+    }
+
     /* ── footer ───────────────────────────────────────────────────────── */
     #foot {
       position: fixed;
@@ -1649,6 +1660,8 @@
 
     <h3>Display</h3>
     <div class="ctrl-row">
+      <div class="chip active" id="chip-material-effects" role="switch" tabindex="0" aria-checked="true"
+        title="Toggle reflective and physically based material effects">Material effects</div>
       <div class="chip" id="chip-wireframe">Wireframe</div>
       <div class="chip" id="chip-rotate">Auto-rotate</div>
     </div>
@@ -1772,6 +1785,7 @@
     const $smoothSlider = $('proc-smooth-slider');
     const $smoothBadge = $('proc-smooth-badge');
     const $resampleBtn = $('proc-resample-btn');
+    const $materialEffectsChip = $('chip-material-effects');
     const $procTabs = [...document.querySelectorAll('[data-proc-tab]')];
     const $procTabPanels = [...document.querySelectorAll('.proc-tab-panel')];
     const $procTooltip = $('proc-tooltip');
@@ -1896,6 +1910,20 @@
     let sourceModelDocument = null;
     let decalAnalysis = { components: [], candidates: [] };
     let rebuildRevision = 0;
+    let materialEffectsPreference = true;
+
+    function syncMaterialEffects() {
+      const forcedOff = $quantizeToggle.checked;
+      const enabled = !forcedOff && materialEffectsPreference;
+      $materialEffectsChip.classList.toggle('active', enabled);
+      $materialEffectsChip.classList.toggle('auto-off', forcedOff);
+      $materialEffectsChip.setAttribute('aria-checked', String(enabled));
+      $materialEffectsChip.setAttribute('aria-disabled', String(forcedOff));
+      $materialEffectsChip.title = forcedOff
+        ? 'Material effects are disabled while color quantization is enabled'
+        : 'Toggle reflective and physically based material effects';
+      viewer.setMaterialEffects(enabled);
+    }
 
     function updateInfoDisplay(triangles) {
       if (!lastBaseName) return;
@@ -2546,13 +2574,13 @@
       }
 
       if (format === 'glb') {
-        const data = await exportProcessedGlb(viewer.currentModel, { GLTFExporter });
+        const data = await exportProcessedGlb(viewer.createExportObject(), { GLTFExporter });
         return { data, extension: 'glb', type: 'application/octet-stream' };
       }
 
       if (format === 'gltf') {
         return {
-          data: await parseGltf(viewer.currentModel, { binary: false }),
+          data: await parseGltf(viewer.createExportObject(), { binary: false }),
           extension: 'gltf',
           type: 'model/gltf+json',
         };
@@ -2584,7 +2612,7 @@
 
       if (format === 'usdz') {
         return {
-          data: await new USDZExporter().parseAsync(viewer.currentModel, { maxTextureSize: 2048 }),
+          data: await new USDZExporter().parseAsync(viewer.createExportObject(), { maxTextureSize: 2048 }),
           extension: 'usdz',
           type: 'model/vnd.usdz+zip',
         };
@@ -2702,6 +2730,7 @@
     // Toggle preview on/off
     $quantizeToggle.addEventListener('change', () => {
       syncDependentControls($quantizeToggle);
+      syncMaterialEffects();
       updateQuantization(false);
     });
 
@@ -2882,6 +2911,20 @@
     bindSlider('ctrl-ambient', v => viewer.setAmbientLight(v));
 
     // ── chips ─────────────────────────────────────────────────────────────
+    function toggleMaterialEffectsPreference() {
+      if ($quantizeToggle.checked) {
+        toast('Material effects stay off while color quantization is enabled', 'work', 2200);
+        return;
+      }
+      materialEffectsPreference = !materialEffectsPreference;
+      syncMaterialEffects();
+    }
+    $materialEffectsChip.addEventListener('click', toggleMaterialEffectsPreference);
+    $materialEffectsChip.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      toggleMaterialEffectsPreference();
+    });
     $('chip-wireframe').addEventListener('click', function () {
       this.classList.toggle('active');
       viewer.setWireframe(this.classList.contains('active'));
@@ -2897,6 +2940,7 @@
         viewer.setBackground(chip.dataset.bg);
       });
     });
+    syncMaterialEffects();
     $('reset-cam').addEventListener('click', () => viewer.resetCamera());
   </script>
 

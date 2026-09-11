@@ -1700,6 +1700,287 @@ export function quantizePalette(image, k = 5) {
   return quantizePaletteFromSamples(samples, k);
 }
 
+function colorToSrgbSample(color) {
+  if (!color) return null;
+  const srgb = { r: 0, g: 0, b: 0 };
+  color.getRGB(srgb, THREE.SRGBColorSpace);
+  return [
+    Math.round(srgb.r * 255),
+    Math.round(srgb.g * 255),
+    Math.round(srgb.b * 255),
+  ];
+}
+
+function materialColorSample(material) {
+  return colorToSrgbSample(material?.color);
+}
+
+function setMaterialColorFromSample(material, sample) {
+  material.color.setRGB(
+    sample[0] / 255,
+    sample[1] / 255,
+    sample[2] / 255,
+    THREE.SRGBColorSpace
+  );
+}
+
+function srgbChannelToLinear(value) {
+  return value <= 0.04045
+    ? value / 12.92
+    : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function linearChannelToSrgb(value) {
+  const clamped = Math.max(0, Math.min(1, value));
+  return clamped <= 0.0031308
+    ? clamped * 12.92
+    : 1.055 * clamped ** (1 / 2.4) - 0.055;
+}
+
+function effectiveTexturePixelSample(data, offset, texture, baseColor) {
+  const isSrgb = texture?.colorSpace === THREE.SRGBColorSpace;
+  const red = data[offset] / 255;
+  const green = data[offset + 1] / 255;
+  const blue = data[offset + 2] / 255;
+  return [
+    Math.round(linearChannelToSrgb((isSrgb ? srgbChannelToLinear(red) : red) * baseColor.r) * 255),
+    Math.round(linearChannelToSrgb((isSrgb ? srgbChannelToLinear(green) : green) * baseColor.g) * 255),
+    Math.round(linearChannelToSrgb((isSrgb ? srgbChannelToLinear(blue) : blue) * baseColor.b) * 255),
+  ];
+}
+
+const MAX_SURFACE_COLOR_SAMPLES = 32768;
+const MIN_SURFACE_SAMPLES_PER_MATERIAL = 64;
+const PALETTE_TEXTURE_SAMPLE_DIMENSION = 256;
+
+function isObjectVisible(object) {
+  for (let current = object; current; current = current.parent) {
+    if (current.visible === false) return false;
+  }
+  return true;
+}
+
+function textureRaster(texture, maxDimension = PALETTE_TEXTURE_SAMPLE_DIMENSION) {
+  const image = texture?.image;
+  const sourceWidth = Math.floor(Number(image?.width) || 0);
+  const sourceHeight = Math.floor(Number(image?.height) || 0);
+  if (!image || sourceWidth < 1 || sourceHeight < 1) return null;
+  if (texture.matrixAutoUpdate !== false) texture.updateMatrix();
+
+  if (image.data && image.data.length >= sourceWidth * sourceHeight) {
+    return {
+      data: image.data,
+      width: sourceWidth,
+      height: sourceHeight,
+      channels: Math.max(1, Math.floor(image.data.length / (sourceWidth * sourceHeight))),
+      texture,
+    };
+  }
+
+  const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.floor(sourceWidth * scale));
+  const height = Math.max(1, Math.floor(sourceHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0, width, height);
+  return {
+    data: context.getImageData(0, 0, width, height).data,
+    width,
+    height,
+    channels: 4,
+    texture,
+  };
+}
+
+function interpolatedTexturePixel(raster, geometry, i0, i1, i2, weights) {
+  if (!raster) return null;
+  const texture = raster.texture;
+  const channel = Math.max(0, Math.floor(Number(texture.channel) || 0));
+  const uv = geometry.getAttribute(channel === 0 ? 'uv' : `uv${channel}`);
+  let u = 0;
+  let v = 0;
+  if (uv) {
+    u = uv.getX(i0) * weights[0] + uv.getX(i1) * weights[1] + uv.getX(i2) * weights[2];
+    v = uv.getY(i0) * weights[0] + uv.getY(i1) * weights[1] + uv.getY(i2) * weights[2];
+  }
+
+  const matrix = texture.matrix?.elements;
+  if (matrix) {
+    const transformedU = matrix[0] * u + matrix[3] * v + matrix[6];
+    v = matrix[1] * u + matrix[4] * v + matrix[7];
+    u = transformedU;
+  }
+  u = wrappedTextureCoordinate(u, texture.wrapS ?? THREE.ClampToEdgeWrapping);
+  v = wrappedTextureCoordinate(v, texture.wrapT ?? THREE.ClampToEdgeWrapping);
+  const x = Math.min(raster.width - 1, Math.max(0, Math.floor(u * raster.width)));
+  const finalV = (texture.flipY ?? true) ? 1 - v : v;
+  const y = Math.min(raster.height - 1, Math.max(0, Math.floor(finalV * raster.height)));
+  const offset = (y * raster.width + x) * raster.channels;
+  const red = raster.data[offset] ?? 0;
+  const green = raster.channels > 1 ? raster.data[offset + 1] : red;
+  const blue = raster.channels > 2 ? raster.data[offset + 2] : red;
+  const alpha = raster.channels > 3 ? raster.data[offset + 3] : 255;
+  return [red, green, blue, alpha];
+}
+
+function effectiveSurfaceColor(material, geometry, indices, weights, mapRaster, alphaRaster) {
+  const baseColor = material._originalColor || material.color || new THREE.Color(1, 1, 1);
+  const linearColor = baseColor.clone();
+  let alpha = material.opacity ?? 1;
+  const texturePixel = interpolatedTexturePixel(
+    mapRaster, geometry, indices[0], indices[1], indices[2], weights
+  );
+  if (texturePixel) {
+    const textureColor = new THREE.Color();
+    textureColor.setRGB(
+      texturePixel[0] / 255,
+      texturePixel[1] / 255,
+      texturePixel[2] / 255,
+      mapRaster.texture.colorSpace === THREE.SRGBColorSpace
+        ? THREE.SRGBColorSpace
+        : THREE.LinearSRGBColorSpace
+    );
+    linearColor.multiply(textureColor);
+    alpha *= texturePixel[3] / 255;
+  }
+
+  const vertexColor = material.vertexColors ? geometry.getAttribute('color') : null;
+  if (vertexColor) {
+    linearColor.r *= vertexColor.getX(indices[0]) * weights[0] +
+      vertexColor.getX(indices[1]) * weights[1] + vertexColor.getX(indices[2]) * weights[2];
+    linearColor.g *= vertexColor.getY(indices[0]) * weights[0] +
+      vertexColor.getY(indices[1]) * weights[1] + vertexColor.getY(indices[2]) * weights[2];
+    linearColor.b *= vertexColor.getZ(indices[0]) * weights[0] +
+      vertexColor.getZ(indices[1]) * weights[1] + vertexColor.getZ(indices[2]) * weights[2];
+    if (vertexColor.itemSize > 3) {
+      alpha *= vertexColor.getW(indices[0]) * weights[0] +
+        vertexColor.getW(indices[1]) * weights[1] + vertexColor.getW(indices[2]) * weights[2];
+    }
+  }
+
+  const alphaPixel = interpolatedTexturePixel(
+    alphaRaster, geometry, indices[0], indices[1], indices[2], weights
+  );
+  if (alphaPixel) alpha *= alphaPixel[1] / 255;
+  const alphaCutoff = Math.max(0, material.alphaTest || 0);
+  if (alpha <= 0.001 || (alphaCutoff > 0 && alpha < alphaCutoff)) return null;
+  return colorToSrgbSample(linearColor);
+}
+
+function forEachRenderableTriangle(rootObject, callback) {
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const ab = new THREE.Vector3();
+  const ac = new THREE.Vector3();
+  rootObject.traverse(mesh => {
+    if (!mesh.isMesh || !mesh.geometry || !isObjectVisible(mesh)) return;
+    const geometry = mesh.geometry;
+    const position = geometry.getAttribute('position');
+    if (!position) return;
+    const index = geometry.index;
+    const triangleCount = Math.floor((index ? index.count : position.count) / 3);
+    for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++) {
+      const material = materialAt(mesh, triangleMaterialIndex(geometry, triangleIndex));
+      if (!material || material.visible === false) continue;
+      const indices = [
+        index ? index.getX(triangleIndex * 3) : triangleIndex * 3,
+        index ? index.getX(triangleIndex * 3 + 1) : triangleIndex * 3 + 1,
+        index ? index.getX(triangleIndex * 3 + 2) : triangleIndex * 3 + 2,
+      ];
+      mesh.getVertexPosition(indices[0], a).applyMatrix4(mesh.matrixWorld);
+      mesh.getVertexPosition(indices[1], b).applyMatrix4(mesh.matrixWorld);
+      mesh.getVertexPosition(indices[2], c).applyMatrix4(mesh.matrixWorld);
+      ab.subVectors(b, a);
+      ac.subVectors(c, a);
+      const area = ab.cross(ac).length() * 0.5;
+      if (area > 0 && Number.isFinite(area)) callback({ mesh, geometry, material, indices, area });
+    }
+  });
+}
+
+/**
+ * Samples authored surface colors in proportion to their world-space area.
+ * A small per-material floor keeps tiny accents eligible for palette clustering.
+ */
+export function sampleModelSurfaceColors(rootObject, {
+  maxSamples = MAX_SURFACE_COLOR_SAMPLES,
+  minSamplesPerMaterial = MIN_SURFACE_SAMPLES_PER_MATERIAL,
+  maxTextureDimension = PALETTE_TEXTURE_SAMPLE_DIMENSION,
+} = {}) {
+  if (!rootObject) return [];
+  rootObject.updateWorldMatrix(true, true);
+  const states = new Map();
+  forEachRenderableTriangle(rootObject, ({ material, area }) => {
+    let state = states.get(material);
+    if (!state) {
+      state = { material, area: 0, target: 0, generated: 0, traversedArea: 0, nextArea: 0 };
+      states.set(material, state);
+    }
+    state.area += area;
+  });
+
+  const activeStates = [...states.values()].filter(state => state.area > 0);
+  if (!activeStates.length) return [];
+  const budget = Math.max(activeStates.length, Math.floor(Number(maxSamples) || 1));
+  const minimum = Math.max(0, Math.min(
+    Math.floor(Number(minSamplesPerMaterial) || 0),
+    Math.floor(budget / activeStates.length)
+  ));
+  const totalArea = activeStates.reduce((sum, state) => sum + state.area, 0);
+  const remaining = budget - minimum * activeStates.length;
+  for (const state of activeStates) {
+    const exactShare = remaining * state.area / totalArea;
+    state.target = minimum + Math.floor(exactShare);
+    state.remainder = exactShare - Math.floor(exactShare);
+  }
+  let assigned = activeStates.reduce((sum, state) => sum + state.target, 0);
+  const remainderOrder = activeStates.slice().sort((left, right) => right.remainder - left.remainder);
+  for (let index = 0; assigned < budget; index++, assigned++) {
+    remainderOrder[index % remainderOrder.length].target++;
+  }
+  for (const state of activeStates) {
+    state.spacing = state.area / state.target;
+    state.nextArea = state.spacing * 0.5;
+  }
+
+  const textureRasters = new Map();
+  const rasterFor = texture => {
+    if (!texture?.image) return null;
+    if (!textureRasters.has(texture)) {
+      textureRasters.set(texture, textureRaster(texture, maxTextureDimension));
+    }
+    return textureRasters.get(texture);
+  };
+  const samples = [];
+  forEachRenderableTriangle(rootObject, ({ geometry, material, indices, area }) => {
+    const state = states.get(material);
+    const endArea = state.traversedArea + area;
+    while (state.generated < state.target && state.nextArea <= endArea + Number.EPSILON) {
+      const sequence = state.generated + 1;
+      const first = (sequence * 0.7548776662466927) % 1;
+      const second = (sequence * 0.5698402909980532) % 1;
+      const root = Math.sqrt(first);
+      const weights = [1 - root, root * (1 - second), root * second];
+      const sample = effectiveSurfaceColor(
+        material,
+        geometry,
+        indices,
+        weights,
+        rasterFor(material._originalMap || material.map),
+        rasterFor(material.alphaMap)
+      );
+      if (sample) samples.push(sample);
+      state.generated++;
+      state.nextArea = state.spacing * (state.generated + 0.5);
+    }
+    state.traversedArea = endArea;
+  });
+  return samples;
+}
+
 // Texture processing keeps several byte-per-pixel buffers alive at once: the
 // canvas, ImageData, palette labels, and (when enabled) cleanup workspaces.
 // Use a coarse device-memory budget instead of silently imposing a fixed
@@ -1927,11 +2208,11 @@ export function processTextureLabels(
 /**
  * Smartly resizes a palette without resetting user edits:
  * - Trimming keeps existing colors intact.
- * - Expanding keeps existing colors and appends new distinct colors from the image.
+ * - Expanding keeps existing colors and appends new distinct model colors.
  */
-function adjustPaletteSize(existingPalette, origImage, targetCount) {
+function adjustPaletteSize(existingPalette, samples, targetCount) {
   if (!existingPalette || existingPalette.length === 0) {
-    return quantizePalette(origImage, targetCount);
+    return quantizePaletteFromSamples(samples, targetCount);
   }
 
   // Trimming (e.g. 5 -> 4): keep the first 4 intact
@@ -1940,7 +2221,7 @@ function adjustPaletteSize(existingPalette, origImage, targetCount) {
   }
 
   // Expanding (e.g. 4 -> 5): keep existing, add new distinct colors
-  const fresh = quantizePalette(origImage, targetCount);
+  const fresh = quantizePaletteFromSamples(samples, targetCount);
   const result = existingPalette.map(c => [...c]);
 
   for (const f of fresh) {
@@ -1977,18 +2258,25 @@ export function applyLiveColorQuantization(
   if (!rootObject) return [];
   let extractedPalette = [];
 
-  // Collect all materials that have or could have texture maps
+  // Collect both textured and solid-color materials. Some GLBs use only
+  // baseColorFactor values and contain no image textures at all.
+  const allMaterials = [];
   const texturedMaterials = [];
+  const solidMaterials = [];
   rootObject.traverse(child => {
     if (child.isMesh && child.material) {
       const materials = Array.isArray(child.material) ? child.material : [child.material];
       for (const mat of materials) {
         if (!mat) continue;
+        if (!allMaterials.includes(mat)) allMaterials.push(mat);
+        if (mat.color && !mat._originalColor) mat._originalColor = mat.color.clone();
         if (!mat._originalMap && mat.map) {
           mat._originalMap = mat.map;
         }
         if (mat._originalMap?.image && !texturedMaterials.includes(mat)) {
           texturedMaterials.push(mat);
+        } else if (mat.color && !solidMaterials.includes(mat)) {
+          solidMaterials.push(mat);
         }
       }
     }
@@ -1996,43 +2284,27 @@ export function applyLiveColorQuantization(
 
   if (forceResample) {
     rootObject._quantizedPalette = null;
-    for (const mat of texturedMaterials) {
+    for (const mat of allMaterials) {
       mat._quantizedPalette = null;
     }
   }
 
+  const collectModelSamples = () => sampleModelSurfaceColors(rootObject);
+
   // 1. Determine a single unified palette across the entire model
   if (customPalette && customPalette.length > 0) {
-    const firstImg = texturedMaterials[0]?._originalMap?.image;
-    extractedPalette = adjustPaletteSize(customPalette, firstImg, numColors);
+    const samples = customPalette.length < numColors ? collectModelSamples() : [];
+    extractedPalette = adjustPaletteSize(customPalette, samples, numColors);
   } else if (rootObject._quantizedPalette && !forceResample) {
-    const firstImg = texturedMaterials[0]?._originalMap?.image;
-    extractedPalette = adjustPaletteSize(rootObject._quantizedPalette, firstImg, numColors);
+    const samples = rootObject._quantizedPalette.length < numColors ? collectModelSamples() : [];
+    extractedPalette = adjustPaletteSize(rootObject._quantizedPalette, samples, numColors);
   } else {
-    // Collect pixel samples from all textured materials
-    const allSamples = [];
-    for (const mat of texturedMaterials) {
-      const origImage = mat._originalMap.image;
-      const cv = document.createElement('canvas');
-      const maxDim = 256;
-      const scale = Math.min(1, maxDim / Math.max(origImage.width || 256, origImage.height || 256));
-      cv.width = Math.max(1, Math.floor((origImage.width || 256) * scale));
-      cv.height = Math.max(1, Math.floor((origImage.height || 256) * scale));
-      const cx = cv.getContext('2d');
-      cx.drawImage(origImage, 0, 0, cv.width, cv.height);
-      const dt = cx.getImageData(0, 0, cv.width, cv.height).data;
-      for (let i = 0; i < dt.length; i += 16) {
-        if (dt[i + 3] > 128) {
-          allSamples.push([dt[i], dt[i + 1], dt[i + 2]]);
-        }
-      }
-    }
-    extractedPalette = quantizePaletteFromSamples(allSamples, numColors);
+    extractedPalette = quantizePaletteFromSamples(collectModelSamples(), numColors);
   }
 
   rootObject._quantizedPalette = extractedPalette;
 
-  // 2. Apply this unified palette to all textured materials
+  // 2. Apply this unified palette to all supported materials
   const indexLut = createIndexLUT(extractedPalette);
   const resolutionPlan = planTextureWorkingSizes(texturedMaterials.map(mat => ({
     width: mat._originalMap.image.width,
@@ -2040,12 +2312,40 @@ export function applyLiveColorQuantization(
   })));
   rootObject._textureResolutionInfo = [];
 
+  // Solid-color materials have no bitmap to rewrite, so quantize their base
+  // color directly for the live preview and processed GLB export.
+  for (const mat of solidMaterials) {
+    if (!mat._originalColor) mat._originalColor = mat.color.clone();
+    mat._quantizedPalette = extractedPalette;
+    if (!enabled) {
+      mat.color.copy(mat._originalColor);
+      mat._quantizationEnabled = false;
+    } else {
+      const source = materialColorSample({ color: mat._originalColor });
+      let closest = 0;
+      let minDistance = Infinity;
+      for (let index = 0; index < extractedPalette.length; index++) {
+        const color = extractedPalette[index];
+        const distance = (source[0] - color[0]) ** 2 +
+          (source[1] - color[1]) ** 2 + (source[2] - color[2]) ** 2;
+        if (distance < minDistance) {
+          minDistance = distance;
+          closest = index;
+        }
+      }
+      setMaterialColorFromSample(mat, extractedPalette[closest]);
+      mat._quantizationEnabled = true;
+    }
+    mat.needsUpdate = true;
+  }
+
   for (let materialIndex = 0; materialIndex < texturedMaterials.length; materialIndex++) {
     const mat = texturedMaterials[materialIndex];
     mat._quantizedPalette = extractedPalette;
 
     if (!enabled) {
       mat.map = mat._originalMap;
+      if (mat._originalColor) mat.color.copy(mat._originalColor);
       mat._quantizationEnabled = false;
       mat._textureProcessingResolution = null;
       mat.needsUpdate = true;
@@ -2066,8 +2366,11 @@ export function applyLiveColorQuantization(
     const data = imgData.data;
 
     let labels = new Uint8Array(W * H);
+    const baseColor = mat._originalColor || mat.color || new THREE.Color(1, 1, 1);
     for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-      const lutIdx = ((data[i] >> 3) << 10) | ((data[i + 1] >> 3) << 5) | (data[i + 2] >> 3);
+      const effective = effectiveTexturePixelSample(data, i, mat._originalMap, baseColor);
+      const lutIdx = ((effective[0] >> 3) << 10) |
+        ((effective[1] >> 3) << 5) | (effective[2] >> 3);
       labels[p] = indexLut[lutIdx];
     }
 
@@ -2098,6 +2401,9 @@ export function applyLiveColorQuantization(
     }
 
     mat.map = newTexture;
+    // The material tint has already been baked into the palette assignment.
+    // Resetting it prevents the quantized texture from being tinted twice.
+    mat.color?.setRGB(1, 1, 1);
     mat._quantizedCanvas = canvas;
     // Keep the discrete source of truth as well as the display canvas.  The
     // canvas is filtered by WebGL in the viewport, whereas 3MF paint needs a
@@ -3104,24 +3410,7 @@ export async function exportMultiColor3MF(
     if (isQuantizeEnabled && matWithPal) {
       palette = matWithPal._quantizedPalette;
     } else {
-      const allSamples = [];
-      for (const m of allMats) {
-        const img = m._originalMap?.image || m.map?.image;
-        if (img) {
-          const cv = document.createElement('canvas');
-          cv.width = Math.min(256, img.width || 256);
-          cv.height = Math.min(256, img.height || 256);
-          const cx = cv.getContext('2d');
-          cx.drawImage(img, 0, 0, cv.width, cv.height);
-          const dt = cx.getImageData(0, 0, cv.width, cv.height).data;
-          for (let i = 0; i < dt.length; i += 32) {
-            if (dt[i + 3] > 128) allSamples.push([dt[i], dt[i + 1], dt[i + 2]]);
-          }
-        } else if (m.color) {
-          allSamples.push([Math.round(m.color.r * 255), Math.round(m.color.g * 255), Math.round(m.color.b * 255)]);
-        }
-      }
-      palette = quantizePaletteFromSamples(allSamples, numColors);
+      palette = quantizePaletteFromSamples(sampleModelSurfaceColors(rootObject), numColors);
     }
   }
 
@@ -3167,10 +3456,14 @@ export async function exportMultiColor3MF(
         ctx.drawImage(img, 0, 0, W, H);
         const imgData = ctx.getImageData(0, 0, W, H);
         const d = imgData.data;
+        const sourceMap = m._originalMap || m.map;
+        const sourceColor = m._originalColor || m.color || new THREE.Color(1, 1, 1);
 
         let labels = new Uint8Array(W * H);
         for (let i = 0, p = 0; i < d.length; i += 4, p++) {
-          const idx = ((d[i] >> 3) << 10) | ((d[i + 1] >> 3) << 5) | (d[i + 2] >> 3);
+          const effective = effectiveTexturePixelSample(d, i, sourceMap, sourceColor);
+          const idx = ((effective[0] >> 3) << 10) |
+            ((effective[1] >> 3) << 5) | (effective[2] >> 3);
           labels[p] = indexLut[idx];
         }
         labels = processTextureLabels(labels, W, H, palette.length, despeckleSize, smoothLevel);
@@ -3252,7 +3545,8 @@ export async function exportMultiColor3MF(
       };
       materialSamplers.set(m, sampler);
     } else if (m.color) {
-      const colIdx = getClosestColor(Math.round(m.color.r * 255), Math.round(m.color.g * 255), Math.round(m.color.b * 255));
+      const [r, g, b] = materialColorSample(m);
+      const colIdx = getClosestColor(r, g, b);
       materialSamplers.set(m, () => ({ color: colIdx, alpha: 255 }));
     } else {
       materialSamplers.set(m, () => ({ color: 0, alpha: 255 }));
