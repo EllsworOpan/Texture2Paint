@@ -2680,7 +2680,7 @@
       }, 30);
     }
 
-    // Dedicated Resample button: FORCES a brand-new K-Means sample
+    // Dedicated Resample button: recompute the palette from the current model.
     $resampleBtn.addEventListener('click', () => {
       updateQuantization(true);
       toast('Resampled palette from model', 'ok', 1500);

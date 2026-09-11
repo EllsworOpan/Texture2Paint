@@ -1617,71 +1617,230 @@ export async function bakeFloatingDecals(rootObject, selections, {
   return { baked: details.filter(detail => detail.pixels > 0).length, removedComponents: removedIds.size, details };
 }
 
-/**
- * Extracts K dominant colors from pixel samples using K-Means clustering.
- */
-export function quantizePaletteFromSamples(samples, k = 5) {
-  if (!samples || samples.length === 0) return [[0, 0, 0], [255, 255, 255]];
-  k = Math.max(2, Math.min(k, samples.length));
+const PALETTE_COVERAGE_BLEND = 0.15;
+const PALETTE_CHROMA_COVERAGE_BOOST = 2;
+const PALETTE_SELECTION_CHROMA_WEIGHT = 1.5;
+const PALETTE_MIN_CANDIDATE_SHARE = 0.0005;
+const PALETTE_ACCENT_MIN_SHARE = 0.001;
+const PALETTE_CHROMATIC_THRESHOLD = 0.04;
+const PALETTE_CANDIDATE_LIMIT = 64;
 
-  const centroids = [samples[Math.floor(Math.random() * samples.length)]];
-  while (centroids.length < k) {
-    let maxDist = -1;
-    let bestSample = samples[0];
-    for (const s of samples) {
-      let minDist = Infinity;
-      for (const c of centroids) {
-        const d = (s[0] - c[0]) ** 2 + (s[1] - c[1]) ** 2 + (s[2] - c[2]) ** 2;
-        if (d < minDist) minDist = d;
-      }
-      if (minDist > maxDist) {
-        maxDist = minDist;
-        bestSample = s;
-      }
+function srgbByteToLinear(value) {
+  const channel = Math.max(0, Math.min(255, value)) / 255;
+  return channel <= 0.04045
+    ? channel / 12.92
+    : ((channel + 0.055) / 1.055) ** 2.4;
+}
+
+/** Converts an sRGB byte triplet to the perceptually uniform OKLab space. */
+function srgbSampleToOklab(sample) {
+  const red = srgbByteToLinear(sample[0]);
+  const green = srgbByteToLinear(sample[1]);
+  const blue = srgbByteToLinear(sample[2]);
+  const l = Math.cbrt(0.4122214708 * red + 0.5363325363 * green + 0.0514459929 * blue);
+  const m = Math.cbrt(0.2119034982 * red + 0.6806995451 * green + 0.1073969566 * blue);
+  const s = Math.cbrt(0.0883024619 * red + 0.2817188376 * green + 0.6299787005 * blue);
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ];
+}
+
+function oklabDistanceSquared(left, right) {
+  return (left[0] - right[0]) ** 2 +
+    (left[1] - right[1]) ** 2 + (left[2] - right[2]) ** 2;
+}
+
+function paletteSelectionDistanceSquared(left, right) {
+  return (left[0] - right[0]) ** 2 + PALETTE_SELECTION_CHROMA_WEIGHT * (
+    (left[1] - right[1]) ** 2 + (left[2] - right[2]) ** 2
+  );
+}
+
+function paletteSampleWeight(sample) {
+  const weight = Number(sample?.surfaceWeight);
+  return Number.isFinite(weight) && weight > 0 ? weight : 1;
+}
+
+function paletteColorBins(samples) {
+  const binsByKey = new Map();
+  for (const sample of samples || []) {
+    if (!sample || sample.length < 3) continue;
+    const red = Math.max(0, Math.min(255, Math.round(Number(sample[0]) || 0)));
+    const green = Math.max(0, Math.min(255, Math.round(Number(sample[1]) || 0)));
+    const blue = Math.max(0, Math.min(255, Math.round(Number(sample[2]) || 0)));
+    const key = ((red >> 3) << 10) | ((green >> 3) << 5) | (blue >> 3);
+    let bin = binsByKey.get(key);
+    if (!bin) {
+      bin = { key, weight: 0, count: 0, red: 0, green: 0, blue: 0 };
+      binsByKey.set(key, bin);
     }
-    centroids.push(bestSample);
+    const weight = paletteSampleWeight(sample);
+    bin.weight += weight;
+    bin.count++;
+    bin.red += red * weight;
+    bin.green += green * weight;
+    bin.blue += blue * weight;
+  }
+  return [...binsByKey.values()].map(bin => {
+    const rgb = [
+      Math.round(bin.red / bin.weight),
+      Math.round(bin.green / bin.weight),
+      Math.round(bin.blue / bin.weight),
+    ];
+    return { ...bin, rgb, oklab: srgbSampleToOklab(rgb) };
+  });
+}
+
+function addDistinctPaletteCandidate(result, seen, candidate) {
+  if (!candidate || seen.has(candidate.key)) return false;
+  seen.add(candidate.key);
+  result.push(candidate);
+  return true;
+}
+
+function paletteCandidates(bins, requestedCount, totalWeight) {
+  const adaptiveShare = Math.min(
+    PALETTE_MIN_CANDIDATE_SHARE,
+    bins.length ? 0.25 / bins.length : PALETTE_MIN_CANDIDATE_SHARE
+  );
+  let eligible = bins.filter(bin => bin.weight >= totalWeight * adaptiveShare);
+  if (eligible.length < requestedCount) eligible = bins.slice();
+  const limit = Math.min(eligible.length, Math.max(requestedCount, PALETTE_CANDIDATE_LIMIT));
+  if (eligible.length <= limit) return eligible;
+
+  const result = [];
+  const seen = new Set();
+  const commonLimit = Math.min(Math.ceil(limit * 0.6), eligible.length);
+  const byWeight = eligible.slice().sort((left, right) => right.weight - left.weight);
+  for (let index = 0; index < commonLimit; index++) {
+    addDistinctPaletteCandidate(result, seen, byWeight[index]);
   }
 
-  for (let iter = 0; iter < 6; iter++) {
-    const clusters = Array.from({ length: k }, () => []);
-    for (const s of samples) {
-      let minDist = Infinity;
-      let closest = 0;
-      for (let j = 0; j < k; j++) {
-        const c = centroids[j];
-        const d = (s[0] - c[0]) ** 2 + (s[1] - c[1]) ** 2 + (s[2] - c[2]) ** 2;
-        if (d < minDist) {
-          minDist = d;
-          closest = j;
-        }
+  // Fill the rest of the shortlist with colors that cover perceptual space.
+  // Eligibility filtering above keeps isolated low-support noise out.
+  while (result.length < limit) {
+    let best = null;
+    let bestDistance = -1;
+    for (const candidate of eligible) {
+      if (seen.has(candidate.key)) continue;
+      let nearest = Infinity;
+      for (const selected of result) {
+        nearest = Math.min(nearest, paletteSelectionDistanceSquared(candidate.oklab, selected.oklab));
       }
-      clusters[closest].push(s);
-    }
-
-    for (let j = 0; j < k; j++) {
-      if (clusters[j].length > 0) {
-        let r = 0, g = 0, b = 0;
-        for (const p of clusters[j]) {
-          r += p[0]; g += p[1]; b += p[2];
-        }
-        centroids[j] = [
-          Math.round(r / clusters[j].length),
-          Math.round(g / clusters[j].length),
-          Math.round(b / clusters[j].length)
-        ];
+      if (nearest > bestDistance) {
+        bestDistance = nearest;
+        best = candidate;
       }
     }
+    if (!addDistinctPaletteCandidate(result, seen, best)) break;
   }
-
-  return centroids;
+  return result;
 }
 
 /**
- * Extracts K dominant colors from an image using K-Means clustering.
+ * Selects a surface-aware palette in OKLab. The facility-location objective
+ * retains real area as the main signal while a smaller coverage term gives
+ * supported accent colors a chance to represent their part of color space.
+ * Entries stay on representative sampled colors instead of muddy cluster means.
+ */
+export function quantizePaletteFromSamples(samples, k = 5) {
+  if (!samples || samples.length === 0) return [[0, 0, 0], [255, 255, 255]];
+  k = Math.max(2, Math.min(Math.floor(Number(k) || 2), samples.length));
+  const bins = paletteColorBins(samples);
+  if (!bins.length) return [[0, 0, 0], [255, 255, 255]];
+
+  const totalWeight = bins.reduce((sum, bin) => sum + bin.weight, 0);
+  const coverageWeights = bins.map(bin => {
+    const chroma = Math.hypot(bin.oklab[1], bin.oklab[2]);
+    return 1 + PALETTE_CHROMA_COVERAGE_BOOST * (1 - Math.exp(-chroma / 0.08));
+  });
+  const totalCoverageWeight = coverageWeights.reduce((sum, weight) => sum + weight, 0);
+  for (let index = 0; index < bins.length; index++) {
+    const bin = bins[index];
+    const frequencyWeight = bin.weight / totalWeight;
+    const coverageWeight = coverageWeights[index] / totalCoverageWeight;
+    bin.objectiveWeight = (1 - PALETTE_COVERAGE_BLEND) * frequencyWeight +
+      PALETTE_COVERAGE_BLEND * coverageWeight;
+  }
+
+  const candidates = paletteCandidates(bins, k, totalWeight);
+  const selected = [];
+  const selectedKeys = new Set();
+  const nearestDistances = new Float64Array(bins.length);
+  nearestDistances.fill(Infinity);
+
+  while (selected.length < Math.min(k, candidates.length)) {
+    let best = null;
+    let bestScore = selected.length ? -1 : Infinity;
+    for (const candidate of candidates) {
+      if (selectedKeys.has(candidate.key)) continue;
+      let score = 0;
+      for (let index = 0; index < bins.length; index++) {
+        const distance = paletteSelectionDistanceSquared(bins[index].oklab, candidate.oklab);
+        score += bins[index].objectiveWeight * (selected.length
+          ? Math.max(0, nearestDistances[index] - distance)
+          : distance);
+      }
+      if ((selected.length && score > bestScore) || (!selected.length && score < bestScore)) {
+        bestScore = score;
+        best = candidate;
+      }
+    }
+    if (!best) break;
+    selected.push(best);
+    selectedKeys.add(best.key);
+    for (let index = 0; index < bins.length; index++) {
+      nearestDistances[index] = Math.min(
+        nearestDistances[index],
+        paletteSelectionDistanceSquared(bins[index].oklab, best.oklab)
+      );
+    }
+  }
+
+  // A long neutral ramp can otherwise spend every slot on lightness levels.
+  // Reserve one slot for a supported chromatic region when the greedy result
+  // contains only neutrals. The support threshold prevents isolated pixels
+  // from being promoted merely because they are saturated.
+  const selectedHasChroma = selected.some(bin => Math.hypot(bin.oklab[1], bin.oklab[2]) >= PALETTE_CHROMATIC_THRESHOLD);
+  const accentCandidates = candidates.filter(bin =>
+    bin.weight >= totalWeight * PALETTE_ACCENT_MIN_SHARE &&
+    Math.hypot(bin.oklab[1], bin.oklab[2]) >= PALETTE_CHROMATIC_THRESHOLD
+  );
+  if (k > 1 && selected.length > 1 && !selectedHasChroma && accentCandidates.length) {
+    const retained = selected.slice(0, -1);
+    let bestAccent = null;
+    let bestCost = Infinity;
+    for (const candidate of accentCandidates) {
+      let cost = 0;
+      for (const bin of bins) {
+        let nearest = paletteSelectionDistanceSquared(bin.oklab, candidate.oklab);
+        for (const center of retained) {
+          nearest = Math.min(nearest, paletteSelectionDistanceSquared(bin.oklab, center.oklab));
+        }
+        cost += bin.objectiveWeight * nearest;
+      }
+      if (cost < bestCost) {
+        bestCost = cost;
+        bestAccent = candidate;
+      }
+    }
+    if (bestAccent) selected[selected.length - 1] = bestAccent;
+  }
+
+  // Preserve the requested palette length when the source contains fewer
+  // distinct color buckets, matching the previous API contract.
+  while (selected.length < k) selected.push(selected[selected.length % Math.max(1, selected.length)] || bins[0]);
+  return selected.map(bin => [...bin.rgb]);
+}
+
+/**
+ * Extracts a coverage-aware perceptual palette from an image.
  */
 export function quantizePalette(image, k = 5) {
   const canvas = document.createElement('canvas');
-  const maxDim = 256;
+  const maxDim = PALETTE_TEXTURE_SAMPLE_DIMENSION;
   const scale = Math.min(1, maxDim / Math.max(image.width || 256, image.height || 256));
   canvas.width = Math.max(1, Math.floor((image.width || 256) * scale));
   canvas.height = Math.max(1, Math.floor((image.height || 256) * scale));
@@ -1751,7 +1910,7 @@ function effectiveTexturePixelSample(data, offset, texture, baseColor) {
 
 const MAX_SURFACE_COLOR_SAMPLES = 32768;
 const MIN_SURFACE_SAMPLES_PER_MATERIAL = 64;
-const PALETTE_TEXTURE_SAMPLE_DIMENSION = 256;
+const PALETTE_TEXTURE_SAMPLE_DIMENSION = 512;
 
 function isObjectVisible(object) {
   for (let current = object; current; current = current.parent) {
@@ -1972,7 +2131,16 @@ export function sampleModelSurfaceColors(rootObject, {
         rasterFor(material._originalMap || material.map),
         rasterFor(material.alphaMap)
       );
-      if (sample) samples.push(sample);
+      if (sample) {
+        // A material's minimum sample count is for color discovery only. Keep
+        // its real world-space area as a separate weight so the floor does not
+        // pretend that every tiny material covers the same amount of surface.
+        Object.defineProperty(sample, 'surfaceWeight', {
+          value: state.spacing,
+          enumerable: false,
+        });
+        samples.push(sample);
+      }
       state.generated++;
       state.nextArea = state.spacing * (state.generated + 0.5);
     }
@@ -2038,28 +2206,37 @@ export function planTextureWorkingSizes(
   });
 }
 
+function closestPaletteIndex(sample, palette, paletteOklab = null) {
+  const source = srgbSampleToOklab(sample);
+  const perceptualPalette = paletteOklab || palette.map(srgbSampleToOklab);
+  let minDistance = Infinity;
+  let bestIndex = 0;
+  for (let index = 0; index < perceptualPalette.length; index++) {
+    const distance = oklabDistanceSquared(source, perceptualPalette[index]);
+    if (distance < minDistance) {
+      minDistance = distance;
+      bestIndex = index;
+    }
+  }
+  return bestIndex;
+}
+
 /**
- * Fast 5-bit RGB Lookup Table that maps RGB -> palette index (0..k-1).
+ * Fast 5-bit RGB Lookup Table that maps RGB -> palette index (0..k-1),
+ * using the same perceptual metric as palette generation.
  */
 function createIndexLUT(palette) {
   const lut = new Uint8Array(32768);
+  const perceptualPalette = palette.map(srgbSampleToOklab);
   for (let r = 0; r < 32; r++) {
     const rVal = (r << 3) | (r >> 2);
     for (let g = 0; g < 32; g++) {
       const gVal = (g << 3) | (g >> 2);
       for (let b = 0; b < 32; b++) {
         const bVal = (b << 3) | (b >> 2);
-        let minDist = Infinity;
-        let bestIdx = 0;
-        for (let k = 0; k < palette.length; k++) {
-          const pal = palette[k];
-          const dist = (rVal - pal[0]) ** 2 + (gVal - pal[1]) ** 2 + (bVal - pal[2]) ** 2;
-          if (dist < minDist) {
-            minDist = dist;
-            bestIdx = k;
-          }
-        }
-        lut[(r << 10) | (g << 5) | b] = bestIdx;
+        lut[(r << 10) | (g << 5) | b] = closestPaletteIndex(
+          [rVal, gVal, bVal], palette, perceptualPalette
+        );
       }
     }
   }
@@ -2227,7 +2404,7 @@ function adjustPaletteSize(existingPalette, samples, targetCount) {
   for (const f of fresh) {
     if (result.length >= targetCount) break;
     const isDuplicate = result.some(c => {
-      return (c[0] - f[0]) ** 2 + (c[1] - f[1]) ** 2 + (c[2] - f[2]) ** 2 < 250;
+      return oklabDistanceSquared(srgbSampleToOklab(c), srgbSampleToOklab(f)) < 0.0004;
     });
     if (!isDuplicate) {
       result.push(f);
@@ -2322,17 +2499,7 @@ export function applyLiveColorQuantization(
       mat._quantizationEnabled = false;
     } else {
       const source = materialColorSample({ color: mat._originalColor });
-      let closest = 0;
-      let minDistance = Infinity;
-      for (let index = 0; index < extractedPalette.length; index++) {
-        const color = extractedPalette[index];
-        const distance = (source[0] - color[0]) ** 2 +
-          (source[1] - color[1]) ** 2 + (source[2] - color[2]) ** 2;
-        if (distance < minDistance) {
-          minDistance = distance;
-          closest = index;
-        }
-      }
+      const closest = closestPaletteIndex(source, extractedPalette);
       setMaterialColorFromSample(mat, extractedPalette[closest]);
       mat._quantizationEnabled = true;
     }
@@ -3415,19 +3582,10 @@ export async function exportMultiColor3MF(
   }
 
   const indexLut = createIndexLUT(palette);
+  const perceptualPalette = palette.map(srgbSampleToOklab);
 
   const getClosestColor = (r, g, b) => {
-    let minDist = Infinity;
-    let best = 0;
-    for (let c = 0; c < palette.length; c++) {
-      const pal = palette[c];
-      const d = (r - pal[0]) ** 2 + (g - pal[1]) ** 2 + (b - pal[2]) ** 2;
-      if (d < minDist) {
-        minDist = d;
-        best = c;
-      }
-    }
-    return best;
+    return closestPaletteIndex([r, g, b], palette, perceptualPalette);
   };
 
   // Build a color sampler for each material

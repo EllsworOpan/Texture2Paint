@@ -26,7 +26,7 @@ Textured 3D models (from 3D scanners, photogrammetry, game assets, or digital sc
 - **Real-Time 3D Viewport Preview:** Quantization is accelerated by an in-memory 5-bit 3D Color LUT for smooth, interactive 60 FPS slider adjustments.
 - **Interactive Swatch Editor & Eyedropper:** Click any color chip to open a color picker. Toggle quantization off to inspect the original texture and use your browser's eyedropper tool to sample colors directly from the 3D model.
 - **Persistent Memory:** Toggling quantization on/off or expanding/trimming the color count preserves your custom color choices without resetting your work.
-- **Dedicated Resample Button:** Re-run K-Means clustering only when you explicitly want a fresh, randomized palette from the model.
+- **Dedicated Resample Button:** Recompute the coverage-aware perceptual palette only when you explicitly request it.
 
 ### 🧹 Texture & Contour Cleanup
 - **Despeckle (Min Island Filter):** Connected-component filter that removes stray dots and color speckles smaller than your chosen pixel threshold (e.g. 50–500 px), merging them into surrounding colors to eliminate wasteful filament purge switches.
@@ -109,7 +109,7 @@ Open `http://localhost:8080` in your browser.
 
 ## Attribution & Credits
 
-Texture2Paint is a fork of the 3D browser viewer foundation developed by [Amal David](https://github.com/Amal-David) (`meshy2glb`). This project expands that foundation into a dedicated 3D printing preparation tool, introducing K-Means color quantization, interactive custom palette editing, connected-component despeckling, majority-mode contour smoothing, UV transform baking, and native multi-material 3MF compilation.
+Texture2Paint is a fork of the 3D browser viewer foundation developed by [Amal David](https://github.com/Amal-David) (`meshy2glb`). This project expands that foundation into a dedicated 3D printing preparation tool, introducing coverage-aware perceptual color quantization, interactive custom palette editing, connected-component despeckling, majority-mode contour smoothing, UV transform baking, and native multi-material 3MF compilation.
 
 ### Third-Party Libraries
 - [three.js](https://threejs.org/) — 3D scene graph, WebGL rendering, and format exporters (MIT)

@@ -8,8 +8,51 @@ import {
   exportMultiColor3MF,
   extractGlbImages,
   planTextureWorkingSizes,
+  quantizePaletteFromSamples,
   sampleModelSurfaceColors,
 } from '../src/processor.js';
+
+test('coverage-aware palette preserves a supported chromatic accent among neutral shades', () => {
+  const neutralSamples = Array.from({ length: 9900 }, (_, index) => {
+    const value = 48 + (index % 25) * 7;
+    return [value, value, value];
+  });
+  const accent = [220, 25, 35];
+  const samples = neutralSamples.concat(Array.from({ length: 100 }, () => accent));
+
+  const palette = quantizePaletteFromSamples(samples, 2);
+
+  assert.ok(palette.some(color => color[0] === color[1] && color[1] === color[2]));
+  assert.ok(palette.some(color => color[0] > color[1] * 3 && color[0] > color[2] * 3));
+  assert.deepEqual(quantizePaletteFromSamples(samples, 2), palette);
+});
+
+test('coverage-aware palette does not promote an isolated accent-colored sample', () => {
+  const samples = Array.from({ length: 9999 }, (_, index) => {
+    const value = 48 + (index % 25) * 7;
+    return [value, value, value];
+  });
+  samples.push([220, 25, 35]);
+
+  const palette = quantizePaletteFromSamples(samples, 2);
+
+  assert.ok(palette.every(color => color[0] === color[1] && color[1] === color[2]));
+});
+
+test('manual palette assignment uses perceptual rather than raw RGB distance', () => {
+  const source = new THREE.Color().setRGB(38 / 255, 216 / 255, 11 / 255, THREE.SRGBColorSpace);
+  const material = new THREE.MeshBasicMaterial({ color: source });
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), material));
+  const palette = [[91, 137, 104], [198, 194, 188]];
+
+  applyLiveColorQuantization(root, 2, true, palette);
+
+  const expected = new THREE.Color().setRGB(
+    palette[1][0] / 255, palette[1][1] / 255, palette[1][2] / 255, THREE.SRGBColorSpace
+  );
+  assert.equal(material.color.getHex(), expected.getHex());
+});
 
 test('live quantization supports models made only from solid material colors', () => {
   const sourceHexes = [0x731f1f, 0x777777, 0x000000, 0x96786b, 0x4e4e4e, 0xffffff];
@@ -73,6 +116,18 @@ test('surface color sampling composes texture tint and weights by model area', (
   assert.equal(samples.length, 1000);
   assert.equal(greenSamples.length, 800);
   assert.equal(tintedTextureSamples.length, 200);
+
+  const flooredSamples = sampleModelSurfaceColors(root, {
+    maxSamples: 100,
+    minSamplesPerMaterial: 40,
+  });
+  const greenWeight = flooredSamples
+    .filter(([r, g, b]) => r === 0 && g === 255 && b === 0)
+    .reduce((sum, sample) => sum + sample.surfaceWeight, 0);
+  const tintedWeight = flooredSamples
+    .filter(([r, g, b]) => (r === 128 && g === 0 && b === 0) || (r === 0 && g === 0 && b === 128))
+    .reduce((sum, sample) => sum + sample.surfaceWeight, 0);
+  assert.ok(Math.abs(greenWeight / tintedWeight - 4) < 1e-10);
 });
 
 test('live texture quantization bakes the material tint exactly once', () => {
