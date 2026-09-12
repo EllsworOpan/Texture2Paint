@@ -936,6 +936,12 @@
       display: none;
     }
 
+    #export-preview-badge.warn {
+      border-color: rgba(255, 190, 92, .5);
+      background: rgba(35, 27, 16, .9);
+      color: var(--warn);
+    }
+
     .repair-diag-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -1742,10 +1748,6 @@
             </label>
           </div>
 
-          <p class="paint-budget-message warn" id="three-mf-preview-warning" role="status" hidden>
-            3MF exports a filament palette. Enable Color Quantization to preview the exported colors.
-          </p>
-
           <div class="proc-dependent" data-enabled-by="proc-quantize-toggle">
             <div class="proc-label-row" style="margin-top: 4px;">
               <span class="proc-tag">Filament Colors</span>
@@ -2062,7 +2064,6 @@
     const $paintBudgetMode = $('paint-budget-mode');
     const $paintBudgetOutput = $('paint-budget-output');
     const $paintBudgetMessage = $('paint-budget-message');
-    const $threeMfPreviewWarning = $('three-mf-preview-warning');
     const $exportPreviewBadge = $('export-preview-badge');
     const $exportProcBtn = $('export-processed-btn');
     const $procBadge = $('proc-model-badge');
@@ -2230,7 +2231,14 @@
       clearTimeout(paintPreviewTimer);
       paintPreviewRevision++;
       viewer.clearPreviewObject();
+      $exportPreviewBadge.classList.remove('warn');
       $exportPreviewBadge.hidden = true;
+    }
+
+    function showQuantizationPreviewWarning() {
+      $exportPreviewBadge.textContent = '3MF PAINT PREVIEW UNAVAILABLE · COLOR QUANTIZATION OFF';
+      $exportPreviewBadge.classList.add('warn');
+      $exportPreviewBadge.hidden = false;
     }
 
     function isThreeMfSelected() {
@@ -2242,9 +2250,6 @@
       document.querySelectorAll('[data-export-format="3mf"]').forEach(section => {
         section.hidden = !isThreeMf;
       });
-      $threeMfPreviewWarning.hidden = !(
-        isThreeMf && viewer.currentModel && !$quantizeToggle.checked
-      );
       if (refreshPreview) schedulePaintPreview();
     }
 
@@ -2253,12 +2258,16 @@
       const shouldPreview = isThreeMfSelected() && viewer.currentModel && $quantizeToggle.checked;
       if (!shouldPreview) {
         clearPaintPreview();
+        if (isThreeMfSelected() && viewer.currentModel && !$quantizeToggle.checked) {
+          showQuantizationPreviewWarning();
+        }
         return;
       }
 
       const revision = ++paintPreviewRevision;
       paintPreviewTimer = setTimeout(async () => {
         const model = viewer.currentModel;
+        $exportPreviewBadge.classList.remove('warn');
         $exportPreviewBadge.textContent = 'BUILDING 3MF PAINT PREVIEW…';
         $exportPreviewBadge.hidden = false;
         try {
@@ -2297,6 +2306,7 @@
         } catch (error) {
           if (revision !== paintPreviewRevision) return;
           viewer.clearPreviewObject();
+          $exportPreviewBadge.classList.add('warn');
           $exportPreviewBadge.textContent = '3MF PAINT PREVIEW UNAVAILABLE';
           $exportPreviewBadge.hidden = false;
           console.warn('3MF paint preview failed:', error);
