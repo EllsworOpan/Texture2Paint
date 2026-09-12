@@ -4381,7 +4381,11 @@ function conformPaintTriangleJunctions(triangles) {
       const a = boundary[index];
       const b = boundary[(index + 1) % boundary.length];
       if (pointKey(a) === pointKey(b)) continue;
-      result.push({ points: [a, b, center], samplePoint: triangle.samplePoint });
+      result.push({
+        points: [a, b, center],
+        samplePoint: triangle.samplePoint,
+        regionId: triangle.regionId,
+      });
     }
   }
   return result;
@@ -4444,7 +4448,11 @@ function conformPaintSourceBoundary(triangles, boundaryPoints) {
       const a = boundary[index];
       const b = boundary[(index + 1) % boundary.length];
       if (pointKey(a) === pointKey(b)) continue;
-      result.push({ points: [a, b, center], samplePoint: triangle.samplePoint });
+      result.push({
+        points: [a, b, center],
+        samplePoint: triangle.samplePoint,
+        regionId: triangle.regionId,
+      });
     }
   }
   return result;
@@ -4536,20 +4544,25 @@ function triangulatePaintGraph(textureSegments, boundaryPoints) {
   }
 
   const result = [];
-  for (const shell of shells) {
+  for (let regionId = 0; regionId < shells.length; regionId++) {
+    const shell = shells[regionId];
     const contour = shell.points.map(point => new THREE.Vector2(point[0], point[1]));
     const holeVectors = shell.holes.map(hole => hole.points.map(point => new THREE.Vector2(point[0], point[1])));
     const triangles = THREE.ShapeUtils.triangulateShape(contour, holeVectors);
     const flattened = shell.points.concat(...shell.holes.map(hole => hole.points));
     if (triangles.length === 0) continue;
-    const sampleTriangle = triangles[0].map(index => flattened[index]);
-    const samplePoint = [
-      (sampleTriangle[0][0] + sampleTriangle[1][0] + sampleTriangle[2][0]) / 3,
-      (sampleTriangle[0][1] + sampleTriangle[1][1] + sampleTriangle[2][1]) / 3,
-    ];
     for (const triangle of triangles) {
       const points = triangle.map(index => flattened[index]);
-      if (Math.abs(polygonArea2D(points)) > 1e-14) result.push({ points, samplePoint });
+      if (Math.abs(polygonArea2D(points)) <= 1e-14) continue;
+      // The graph cycles are geometric rather than paint-labeled. Nested color
+      // and alpha contours can therefore put differently owned triangles in
+      // one triangulated shell. Classify each exact output triangle locally;
+      // this changes no contour positions and adds no refinement geometry.
+      const samplePoint = [
+        (points[0][0] + points[1][0] + points[2][0]) / 3,
+        (points[0][1] + points[1][1] + points[2][1]) / 3,
+      ];
+      result.push({ points, samplePoint, regionId });
     }
   }
   return conformPaintTriangleJunctions(result);
@@ -4591,9 +4604,7 @@ function paintTriangulationSignature(tri, triangles) {
     const state = paint.alpha < 128 ? -1 : paint.color;
     areaByState.set(state, (areaByState.get(state) || 0) + area);
     if (!regionsByState.has(state)) regionsByState.set(state, new Set());
-    regionsByState.get(state).add(
-      `${Math.round(triangle.samplePoint[0] * 1e9)}_${Math.round(triangle.samplePoint[1] * 1e9)}`
-    );
+    regionsByState.get(state).add(triangle.regionId);
   }
   return { areaByState, regionsByState, coveredArea };
 }

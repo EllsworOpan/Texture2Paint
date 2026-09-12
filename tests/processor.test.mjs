@@ -798,6 +798,31 @@ test('3MF export applies base-map and vertex alpha cutouts', async () => {
   assert.ok(vertexAlphaArea > 0 && vertexAlphaArea < 100);
 });
 
+test('3MF paint export keeps triangle ownership local around nested alpha contours', async () => {
+  const states = [
+    -1, 1, 1, -1, -1,
+     0, 0, 0,  0,  0,
+     0,-1, 0,  1,  0,
+    -1,-1,-1,  1,  1,
+     1, 0,-1,  1,  0,
+  ];
+  const root = createQuantizedSquareRoot(
+    Uint8Array.from(states, state => Math.max(0, state)),
+    5,
+    5
+  );
+  const rgba = root.children[0].material._quantizedCanvas.getContext().getImageData().data;
+  for (let pixel = 0; pixel < states.length; pixel++) {
+    rgba[pixel * 4 + 3] = states[pixel] < 0 ? 0 : 255;
+  }
+  root.children[0].material.alphaTest = 0.5;
+
+  const modelXml = await exportedModelXml(root, 0);
+  const mesh = inspectPaintMesh(modelXml);
+  assert.ok(Math.abs((mesh.areaByColor.get(1) || 0) - 40) < 1e-6);
+  assert.ok(Math.abs((mesh.areaByColor.get(2) || 0) - 28) < 1e-6);
+});
+
 test('texture working-size planner preserves full source resolution within budget', () => {
   const [size] = planTextureWorkingSizes(
     [{ width: 4096, height: 1024 }],
