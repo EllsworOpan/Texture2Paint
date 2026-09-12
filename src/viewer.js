@@ -129,6 +129,7 @@ export class Viewer {
     addEventListener('resize', () => this._onResize());
 
     this.currentModel = null;
+    this._previewObject = null;
     this.loader = new GLTFLoader();
     this._lastBlobUrl = null;
 
@@ -215,8 +216,9 @@ export class Viewer {
 
   setWireframe(on) {
     this._wireframe = on;
-    if (this.currentModel) {
-      this.currentModel.traverse(o => {
+    const displayedObject = this._previewObject || this.currentModel;
+    if (displayedObject) {
+      displayedObject.traverse(o => {
         if (o.isMesh && o.material) {
           const mats = Array.isArray(o.material) ? o.material : [o.material];
           for (const m of mats) m.wireframe = on;
@@ -312,6 +314,7 @@ export class Viewer {
 
   applyMaterialSettings() {
     if (this.currentModel) this._applyMaterialSettings(this.currentModel);
+    if (this._previewObject) this._applyMaterialSettings(this._previewObject);
   }
 
   countTriangles(scene) {
@@ -366,6 +369,25 @@ export class Viewer {
     return clone;
   }
 
+  /** Displays a derived representation without changing the export model. */
+  setPreviewObject(object) {
+    this.clearPreviewObject();
+    if (!object || object === this.currentModel) return;
+    this._previewObject = object;
+    if (this.currentModel) this.scene.remove(this.currentModel);
+    this._applyMaterialSettings(object);
+    this.scene.add(object);
+  }
+
+  /** Restores the processed model after a format-specific preview. */
+  clearPreviewObject() {
+    if (!this._previewObject) return;
+    this.scene.remove(this._previewObject);
+    disposeModelResources(this._previewObject);
+    this._previewObject = null;
+    if (this.currentModel && !this.currentModel.parent) this.scene.add(this.currentModel);
+  }
+
   loadObject(object) {
     this._isUvFlipped = false;
     applyUvFlip(object, false); // Initialize original UV cache
@@ -378,6 +400,7 @@ export class Viewer {
     uvFlipped = this._isUvFlipped,
     disposePrevious = true,
   } = {}) {
+    this.clearPreviewObject();
     if (this.currentModel) {
       this.scene.remove(this.currentModel);
       if (disposePrevious && this.currentModel !== object) {

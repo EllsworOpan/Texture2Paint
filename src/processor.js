@@ -5147,7 +5147,7 @@ export async function exportMultiColor3MF(
       tracePaintBoundaries();
     } catch (error) {
       if (overridePaintBudget) {
-        throw new Error(`Refined paint export could not be completed: ${error?.message || 'boundary tracing failed'}. Turn off Refine Color Boundaries and try again.`);
+        throw new Error(`Traced paint export could not be completed: ${error?.message || 'boundary tracing failed'}. Turn off Trace Color Boundaries and try again.`);
       }
       if (!/too complex to trace safely|too many texels to trace safely|automatic paint budget/i.test(error?.message || '')) {
         throw error;
@@ -5242,7 +5242,7 @@ export async function exportMultiColor3MF(
     }
     if (Math.abs(coveredArea - 0.5) > 1e-7) {
       if (overridePaintBudget) {
-        throw new Error('Refined paint export could not triangulate a color boundary without gaps. Turn off Refine Color Boundaries and try again.');
+        throw new Error('Traced paint export could not triangulate a color boundary without gaps. Turn off Trace Color Boundaries and try again.');
       }
       // Keep the source face rather than failing the whole export. Boundary
       // edge splits are retained so adjacent faces remain conforming, while
@@ -5275,7 +5275,7 @@ export async function exportMultiColor3MF(
         alpha: paint.alpha,
       });
       if (!denseMeshPaintFallback && !overridePaintBudget && currentTriangles.length > automaticTriangleBudget) {
-        throw new Error(`Traced paint mesh exceeds the ${automaticTriangleBudget.toLocaleString()}-triangle automatic paint budget. Turn off Refine Color Boundaries or enable its override.`);
+        throw new Error(`Traced paint mesh exceeds the ${automaticTriangleBudget.toLocaleString()}-triangle automatic paint budget. Turn off Trace Color Boundaries or enable its override.`);
       }
     }
   }
@@ -5300,6 +5300,7 @@ export async function exportMultiColor3MF(
 
   let allTrianglesXml = '';
   let emittedTriangleCount = 0;
+  const previewTriangles = paintOptions?.previewOnly ? [] : null;
 
   function emitTriangle(v0, v1, v2, chosenColor) {
     const colorIdx = Math.max(0, Math.min(palette.length - 1, chosenColor));
@@ -5308,7 +5309,9 @@ export async function exportMultiColor3MF(
     // PrusaSlicer and Bambu/Orca use the same TriangleSelector hexadecimal
     // bitstream; only the attribute name differs. A plain palette index in
     // paint_color is decoded as a partial-triangle subdivision instruction.
-    allTrianglesXml += `<triangle v1="${v0}" v2="${v1}" v3="${v2}" slic3rpe:mmu_segmentation="${mmuHex}" paint_color="${mmuHex}" pid="1" p1="${colorIdx}" />\n`;
+    if (!previewTriangles) {
+      allTrianglesXml += `<triangle v1="${v0}" v2="${v1}" v3="${v2}" slic3rpe:mmu_segmentation="${mmuHex}" paint_color="${mmuHex}" pid="1" p1="${colorIdx}" />\n`;
+    }
     emittedTriangleCount++;
   }
 
@@ -5327,6 +5330,7 @@ export async function exportMultiColor3MF(
 
     if (v0_idx !== v1_idx && v1_idx !== v2_idx && v0_idx !== v2_idx) {
       emitTriangle(v0_idx, v1_idx, v2_idx, chosenColor);
+      if (previewTriangles) previewTriangles.push(tri);
     }
   }
 
@@ -5349,6 +5353,49 @@ export async function exportMultiColor3MF(
     ),
     triangleCount: emittedTriangleCount,
   };
+
+  if (previewTriangles) {
+    const positions = new Float32Array(previewTriangles.length * 9);
+    const colors = new Float32Array(previewTriangles.length * 9);
+    let offset = 0;
+    for (const triangle of previewTriangles) {
+      const paletteColor = palette[Math.max(0, Math.min(palette.length - 1, triangle.chosenColor))] || palette[0];
+      const linearColor = paletteColor.map(channel => srgbChannelToLinear(channel / 255));
+      for (const point of [triangle.p0, triangle.p1, triangle.p2]) {
+        // Paint triangulation runs in millimeter, Z-up export space. Convert
+        // it back to the viewer's world-space orientation for an exact visual
+        // representation without replacing the processed export model.
+        positions[offset] = point[0] / scaleRatio;
+        positions[offset + 1] = point[2] / scaleRatio + minZ;
+        positions[offset + 2] = -point[1] / scaleRatio;
+        colors[offset] = linearColor[0];
+        colors[offset + 1] = linearColor[1];
+        colors[offset + 2] = linearColor[2];
+        offset += 3;
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      flatShading: true,
+      roughness: 1,
+      metalness: 0,
+      side: THREE.DoubleSide,
+    });
+    const preview = new THREE.Mesh(geometry, material);
+    preview.name = '3MF Paint Preview';
+    preview.userData.texture2PaintPreview = {
+      paintMode: rootObject._lastPaintBake.paintMode,
+      triangleCount: emittedTriangleCount,
+    };
+    return preview;
+  }
 
   let verticesXml = '';
   for (let i = 0; i < weldedVertices.length; i++) {

@@ -150,6 +150,27 @@ test('superseded model resources are disposed exactly once', () => {
   assert.equal(originalTextureDisposals, 1);
 });
 
+test('format preview can be shown and cleared without replacing the export model', () => {
+  const scene = new THREE.Scene();
+  const root = new THREE.Group();
+  root.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial()));
+  scene.add(root);
+  const preview = new THREE.Mesh(new THREE.PlaneGeometry(), new THREE.MeshBasicMaterial());
+  const viewer = testViewer(root);
+  viewer.scene = scene;
+  viewer._previewObject = null;
+
+  viewer.setPreviewObject(preview);
+  assert.equal(viewer.currentModel, root);
+  assert.equal(root.parent, null);
+  assert.equal(preview.parent, scene);
+
+  viewer.clearPreviewObject();
+  assert.equal(viewer.currentModel, root);
+  assert.equal(root.parent, scene);
+  assert.equal(viewer._previewObject, null);
+});
+
 test('viewport picking raycasts to an unlit authored surface color', () => {
   const material = new THREE.MeshStandardMaterial({ color: 0x336699 });
   const root = new THREE.Group();

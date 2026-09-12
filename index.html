@@ -910,6 +910,32 @@
       color: var(--err);
     }
 
+    .proc-section[hidden] {
+      display: none;
+    }
+
+    #export-preview-badge {
+      position: fixed;
+      top: 58px;
+      left: 50%;
+      z-index: 12;
+      transform: translateX(-50%);
+      padding: 5px 9px;
+      border: 1px solid rgba(108, 138, 255, .45);
+      border-radius: 999px;
+      background: rgba(15, 15, 26, .82);
+      color: var(--accent);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .05em;
+      pointer-events: none;
+      backdrop-filter: blur(10px);
+    }
+
+    #export-preview-badge[hidden] {
+      display: none;
+    }
+
     .repair-diag-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -1716,6 +1742,10 @@
             </label>
           </div>
 
+          <p class="paint-budget-message warn" id="three-mf-preview-warning" role="status" hidden>
+            3MF exports a filament palette. Enable Color Quantization to preview the exported colors.
+          </p>
+
           <div class="proc-dependent" data-enabled-by="proc-quantize-toggle">
             <div class="proc-label-row" style="margin-top: 4px;">
               <span class="proc-tag">Filament Colors</span>
@@ -1776,7 +1806,7 @@
           </div>
         </div>
 
-        <div class="proc-section">
+        <div class="proc-section" data-export-format="3mf">
           <div class="proc-label-row">
             <span class="proc-label-with-help">
               <span class="proc-label">Print Detail</span>
@@ -1807,20 +1837,20 @@
           </div>
         </div>
 
-        <div class="proc-section">
+        <div class="proc-section" data-export-format="3mf">
           <div class="proc-label-row">
             <span class="proc-label-with-help">
               <span class="proc-label">Paint Geometry</span>
               <button class="proc-help" type="button" aria-label="About paint geometry" aria-expanded="false"
-                aria-describedby="proc-tooltip" data-help="Refined boundaries subdivide the mesh along color contours for crisp paint edges. Existing-triangle mode assigns one printable color to each current triangle without adding geometry. The projection is advisory and never changes an explicit override.">i</button>
+                aria-describedby="proc-tooltip" data-help="Traced boundaries subdivide the mesh along color contours for crisp paint edges. Existing-triangle mode assigns one printable color to each current triangle without adding geometry. This setting and its preview apply only to 3MF.">i</button>
             </span>
-            <span class="status-badge badge-normal" id="paint-mode-badge">REFINED</span>
+            <span class="status-badge badge-normal" id="paint-mode-badge">TRACED</span>
           </div>
 
           <div class="proc-dependent" data-enabled-by="proc-quantize-toggle">
             <div class="toggle-row" style="margin-bottom: 7px;">
-              <span class="toggle-text">Refine Color Boundaries</span>
-              <label class="switch" for="proc-refine-boundaries" aria-label="Refine Color Boundaries">
+              <span class="toggle-text">Trace Color Boundaries</span>
+              <label class="switch" for="proc-refine-boundaries" aria-label="Trace Color Boundaries">
                 <input type="checkbox" id="proc-refine-boundaries" checked>
                 <span class="slider"></span>
               </label>
@@ -1837,7 +1867,7 @@
                 <span class="repair-diag-val" id="paint-budget-source">-</span>
               </div>
               <div class="repair-diag-item">
-                <span class="repair-diag-label">Refined Estimate</span>
+                <span class="repair-diag-label">Traced Estimate</span>
                 <span class="repair-diag-val" id="paint-budget-projected">-</span>
               </div>
               <div class="repair-diag-item">
@@ -1850,7 +1880,7 @@
               </div>
               <div class="repair-diag-item">
                 <span class="repair-diag-label">Current Mode</span>
-                <span class="repair-diag-val" id="paint-budget-mode">Refined</span>
+                <span class="repair-diag-val" id="paint-budget-mode">Traced</span>
               </div>
               <div class="repair-diag-item">
                 <span class="repair-diag-label">Expected Output</span>
@@ -1938,6 +1968,8 @@
 
   <!-- toast -->
   <div id="toast" class="hidden"></div>
+
+  <div id="export-preview-badge" role="status" hidden>BUILDING 3MF PAINT PREVIEW…</div>
 
   <!-- file input -->
   <input id="picker" type="file" accept=".meshy,.glb,.gltf,.obj,.ply,.dae,.fbx,.zip" multiple hidden>
@@ -2030,6 +2062,8 @@
     const $paintBudgetMode = $('paint-budget-mode');
     const $paintBudgetOutput = $('paint-budget-output');
     const $paintBudgetMessage = $('paint-budget-message');
+    const $threeMfPreviewWarning = $('three-mf-preview-warning');
+    const $exportPreviewBadge = $('export-preview-badge');
     const $exportProcBtn = $('export-processed-btn');
     const $procBadge = $('proc-model-badge');
     const $textureList = $('proc-texture-list');
@@ -2188,7 +2222,87 @@
     const paintBudgetCache = new Map();
     let paintModePreference = 'auto';
     let lastPaintBudgetEstimate = null;
+    let paintPreviewTimer;
+    let paintPreviewRevision = 0;
     let materialEffectsPreference = true;
+
+    function clearPaintPreview() {
+      clearTimeout(paintPreviewTimer);
+      paintPreviewRevision++;
+      viewer.clearPreviewObject();
+      $exportPreviewBadge.hidden = true;
+    }
+
+    function isThreeMfSelected() {
+      return $format.value === '3mf';
+    }
+
+    function syncExportFormatUI({ refreshPreview = true } = {}) {
+      const isThreeMf = isThreeMfSelected();
+      document.querySelectorAll('[data-export-format="3mf"]').forEach(section => {
+        section.hidden = !isThreeMf;
+      });
+      $threeMfPreviewWarning.hidden = !(
+        isThreeMf && viewer.currentModel && !$quantizeToggle.checked
+      );
+      if (refreshPreview) schedulePaintPreview();
+    }
+
+    function schedulePaintPreview() {
+      clearTimeout(paintPreviewTimer);
+      const shouldPreview = isThreeMfSelected() && viewer.currentModel && $quantizeToggle.checked;
+      if (!shouldPreview) {
+        clearPaintPreview();
+        return;
+      }
+
+      const revision = ++paintPreviewRevision;
+      paintPreviewTimer = setTimeout(async () => {
+        const model = viewer.currentModel;
+        $exportPreviewBadge.textContent = 'BUILDING 3MF PAINT PREVIEW…';
+        $exportPreviewBadge.hidden = false;
+        try {
+          const preview = await exportMultiColor3MF(
+            model,
+            parseInt($colorsNum.value || '5', 10),
+            true,
+            parseFloat($('proc-size-num')?.value || '150'),
+            viewer.isUvFlipped(),
+            activePalette,
+            parseInt($despeckleNum?.value || $despeckleSlider.value || '0', 10),
+            parseInt($smoothSlider.value || '0', 10),
+            parseFloat($('proc-paint-resolution')?.value || '0'),
+            {
+              refineBoundaries: $refineBoundariesToggle.checked,
+              overrideBudget: paintModePreference === 'override',
+              previewOnly: true,
+            }
+          );
+          if (revision !== paintPreviewRevision || model !== viewer.currentModel ||
+            !isThreeMfSelected() || !$quantizeToggle.checked) {
+            disposeModelResources(preview);
+            return;
+          }
+          viewer.setPreviewObject(preview);
+          const usedExistingTriangles = preview.userData?.texture2PaintPreview?.paintMode === 'existing-triangles';
+          if (usedExistingTriangles && $refineBoundariesToggle.checked && paintModePreference !== 'override') {
+            $refineBoundariesToggle.checked = false;
+            paintModePreference = 'existing-triangles';
+            if (lastPaintBudgetEstimate) renderPaintBudget(lastPaintBudgetEstimate);
+            else updatePaintModeUI(null);
+          }
+          const previewMode = usedExistingTriangles ? 'EXISTING TRIANGLES' : 'TRACED BOUNDARIES';
+          $exportPreviewBadge.textContent = `3MF PAINT PREVIEW · ${previewMode}`;
+          $exportPreviewBadge.hidden = false;
+        } catch (error) {
+          if (revision !== paintPreviewRevision) return;
+          viewer.clearPreviewObject();
+          $exportPreviewBadge.textContent = '3MF PAINT PREVIEW UNAVAILABLE';
+          $exportPreviewBadge.hidden = false;
+          console.warn('3MF paint preview failed:', error);
+        }
+      }, 260);
+    }
 
     function disposeStageCache(cache) {
       for (const entry of cache.values()) disposeModelResources(entry.model);
@@ -2201,6 +2315,7 @@
       clearTimeout(repairTimer);
       clearTimeout(simplifyTimer);
       clearTimeout(paintBudgetTimer);
+      clearPaintPreview();
       clearTimeout(decalSettingsTimer);
       disposeStageCache(decalStageCache);
       disposeStageCache(repairStageCache);
@@ -2773,6 +2888,7 @@
         $simplifyBadge.className = 'status-badge badge-normal';
       }
       schedulePaintBudgetAnalysis();
+      syncExportFormatUI();
 
       if (reason) {
         const failures = decalResult?.details?.filter(detail => detail.error || detail.pixels === 0).length || 0;
@@ -3271,6 +3387,8 @@
     $quantizeToggle.addEventListener('change', () => {
       syncDependentControls($quantizeToggle);
       syncMaterialEffects();
+      syncExportFormatUI({ refreshPreview: false });
+      if (!$quantizeToggle.checked) clearPaintPreview();
       updateQuantization(false);
     });
 
@@ -3280,6 +3398,7 @@
       const val = parseFloat(e.target.value);
       $alphaSliderBadge.textContent = val.toFixed(2);
       viewer.setAlphaTest(val);
+      schedulePaintPreview();
       if ($decalBakeToggle.checked) {
         clearTimeout(decalSettingsTimer);
         decalSettingsTimer = setTimeout(() => rebuildProcessedModel(), 120);
@@ -3309,9 +3428,9 @@
     function updatePaintModeUI(estimate = lastPaintBudgetEstimate) {
       const refined = $refineBoundariesToggle.checked;
       const override = refined && paintModePreference === 'override';
-      $paintModeBadge.textContent = override ? 'OVERRIDE' : (refined ? 'REFINED' : 'TRIANGLES');
+      $paintModeBadge.textContent = override ? 'OVERRIDE' : (refined ? 'TRACED' : 'TRIANGLES');
       $paintModeBadge.className = 'status-badge ' + (override ? 'badge-warn' : 'badge-normal');
-      $paintBudgetMode.textContent = override ? 'Refined Override' : (refined ? 'Refined' : 'Existing Triangles');
+      $paintBudgetMode.textContent = override ? 'Traced Override' : (refined ? 'Traced' : 'Existing Triangles');
       $paintBudgetOutput.textContent = estimate
         ? (refined ? estimate.projectedTriangles : estimate.sourceTriangles).toLocaleString()
         : '-';
@@ -3366,16 +3485,16 @@
 
       if (estimate.status === 'over') {
         if ($refineBoundariesToggle.checked && paintModePreference === 'override') {
-          $paintBudgetStatus.textContent = `● Refined override enabled (${utilization}%)`;
+          $paintBudgetStatus.textContent = `● Traced override enabled (${utilization}%)`;
           $paintBudgetStatus.className = 'repair-diag-status err';
-          $paintBudgetMessage.textContent = 'The recommended budget is being ignored. Export will attempt the full refined result without an application limit and may be slow, exhaust memory, freeze the tab, or fail. It will not silently fall back.';
+          $paintBudgetMessage.textContent = 'The recommended budget is being ignored. Export will attempt the full traced result without an application limit and may be slow, exhaust memory, freeze the tab, or fail. It will not silently fall back.';
           $paintBudgetMessage.className = 'paint-budget-message err';
         } else {
           $paintBudgetStatus.textContent = `● Over recommendation (${utilization}%)`;
           $paintBudgetStatus.className = 'repair-diag-status warn';
           $paintBudgetMessage.textContent = paintModePreference === 'auto'
-            ? 'Boundary refinement was switched off automatically. Turn it back on to explicitly override the recommendation, or simplify, increase Boundary Accuracy, or despeckle first.'
-            : 'Existing-triangle painting is selected. Turn on boundary refinement to attempt the projected result with an explicit override.';
+            ? 'Boundary tracing was switched off automatically. Turn it back on to explicitly override the recommendation, or simplify, increase Boundary Accuracy, or despeckle first.'
+            : 'Existing-triangle painting is selected. Turn on boundary tracing to attempt the projected result with an explicit override.';
           $paintBudgetMessage.className = 'paint-budget-message warn';
         }
       } else if (estimate.status === 'warning') {
@@ -3384,17 +3503,17 @@
           : '● Existing-triangle painting selected';
         $paintBudgetStatus.className = 'repair-diag-status warn';
         $paintBudgetMessage.textContent = $refineBoundariesToggle.checked
-          ? `The refined result is approaching the recommended one-million-triangle budget${confidence}. Simplification, Boundary Accuracy, or despeckle can reduce it.`
-          : `The refined estimate is approaching the recommendation${confidence}, but the selected output uses only existing triangles.`;
+          ? `The traced result is approaching the recommended one-million-triangle budget${confidence}. Simplification, Boundary Accuracy, or despeckle can reduce it.`
+          : `The traced estimate is approaching the recommendation${confidence}, but the selected output uses only existing triangles.`;
         $paintBudgetMessage.className = 'paint-budget-message warn';
       } else {
         $paintBudgetStatus.textContent = $refineBoundariesToggle.checked
-          ? `● Refined projection healthy (${utilization}%)`
+          ? `● Traced projection healthy (${utilization}%)`
           : '● Existing-triangle painting selected';
         $paintBudgetStatus.className = 'repair-diag-status ok';
         $paintBudgetMessage.textContent = $refineBoundariesToggle.checked
           ? `Projected from a stratified sample of the processed color boundaries${confidence}.`
-          : `The selected output assigns one color to each of the ${estimate.sourceTriangles.toLocaleString()} existing triangles; the refined projection remains visible for comparison.`;
+          : `The selected output assigns one color to each of the ${estimate.sourceTriangles.toLocaleString()} existing triangles; the traced projection remains visible for comparison.`;
         $paintBudgetMessage.className = 'paint-budget-message';
       }
     }
@@ -3431,7 +3550,7 @@
           if (analysisRevision === rebuildRevision && model === viewer.currentModel) renderPaintBudget(estimate);
         } catch (error) {
           if (analysisRevision !== rebuildRevision || model !== viewer.currentModel) return;
-          resetPaintBudgetUI('Boundary projection could not be estimated. Refined export remains available, and any failure will be reported rather than silently changing modes.');
+          resetPaintBudgetUI('Boundary projection could not be estimated. Traced export remains available, and any failure will be reported rather than silently changing modes.');
           console.warn('Paint budget analysis failed:', error);
         }
       }, 180);
@@ -3440,7 +3559,7 @@
     $refineBoundariesToggle.addEventListener('change', () => {
       if ($refineBoundariesToggle.checked && lastPaintBudgetEstimate?.status === 'over') {
         const accepted = window.confirm(
-          `The refined result is estimated at ${lastPaintBudgetEstimate.projectedTriangles.toLocaleString()} triangles, above the ${lastPaintBudgetEstimate.maxOutputTriangles.toLocaleString()}-triangle recommendation.\n\n` +
+          `The traced result is estimated at ${lastPaintBudgetEstimate.projectedTriangles.toLocaleString()} triangles, above the ${lastPaintBudgetEstimate.maxOutputTriangles.toLocaleString()}-triangle recommendation.\n\n` +
           'Override it anyway? The export will have no application-imposed resource limit. It may be slow, exhaust memory, freeze this tab, or fail, and it will not silently fall back.'
         );
         if (!accepted) {
@@ -3455,6 +3574,7 @@
       }
       if (lastPaintBudgetEstimate) renderPaintBudget(lastPaintBudgetEstimate);
       else updatePaintModeUI(null);
+      schedulePaintPreview();
     });
 
     let simplifyTimer;
@@ -3479,8 +3599,14 @@
       if ($simplifyToggle.checked) updateMeshSimplification(false);
     });
 
-    $('proc-size-num').addEventListener('input', schedulePaintBudgetAnalysis);
-    $('proc-paint-resolution').addEventListener('input', schedulePaintBudgetAnalysis);
+    $('proc-size-num').addEventListener('input', () => {
+      schedulePaintBudgetAnalysis();
+      schedulePaintPreview();
+    });
+    $('proc-paint-resolution').addEventListener('input', () => {
+      schedulePaintBudgetAnalysis();
+      schedulePaintPreview();
+    });
 
     // ── Mesh Repair & Sealing Logic ──────────────────────────────────────────
 
@@ -3608,6 +3734,10 @@
       const val = e.target.value;
       const label = val === 'automatic' ? 'Automatic (Compatible)' : val.toUpperCase();
       toast(`Target texture format: ${label}`, 'ok', 1500);
+    });
+
+    $format.addEventListener('change', () => {
+      syncExportFormatUI();
     });
 
     // Both export buttons trigger the unified exporter

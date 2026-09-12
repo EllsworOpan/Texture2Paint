@@ -884,6 +884,27 @@ test('3MF existing-triangle paint mode does not create contour geometry', async 
   assert.equal(root._lastPaintBake.tracedBoundarySegments, 0);
 });
 
+test('3MF paint preview returns the same existing-triangle representation without packaging', async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([
+    0, 1,
+    1, 0,
+  ]), 2, 2);
+  const preview = await exportMultiColor3MF(
+    root, 2, true, 10, false, root._quantizedPalette, 0, 0, 0,
+    { refineBoundaries: false, previewOnly: true }
+  );
+
+  assert.equal(preview.isMesh, true);
+  assert.equal(preview.geometry.getAttribute('position').count, 6);
+  assert.equal(preview.geometry.getAttribute('color').count, 6);
+  assert.equal(preview.userData.texture2PaintPreview.paintMode, 'existing-triangles');
+  assert.equal(preview.userData.texture2PaintPreview.triangleCount, 2);
+  const size = preview.geometry.boundingBox.getSize(new THREE.Vector3());
+  assert.deepEqual(size.toArray().map(value => Math.round(value)), [1, 1, 0]);
+  preview.geometry.dispose();
+  preview.material.dispose();
+});
+
 test('3MF paint override bypasses the automatic recommendation without falling back', async () => {
   const labels = new Uint8Array([
     0, 1,
