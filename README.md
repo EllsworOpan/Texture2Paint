@@ -39,6 +39,13 @@ Textured 3D models (from 3D scanners, photogrammetry, game assets, or digital sc
 - **Clean WYSIWYG Output:** Successfully baked sheets are physically removed from the processed model. Exporters consume the same visible model snapshot, and the 3MF exporter explicitly excludes hidden geometry from both bounds and mesh output.
 
 ### 🖨️ Slicer-Ready Multi-Material 3MF Export
+
+Choose the **Slicer** in the 3MF Print Detail section. **PrusaSlicer 2 / Bambu Studio** writes separate native paint encodings, including slots 17–32 (validated against Prusa 2.9.6 and Bambu 2.8.2.61). **OrcaSlicer 2.4.2** rejects paint using slots above 16; unused palette entries do not block export. **PrusaSlicer 3** is experimental and targets alpha12 with native JSON paint annotations. All targets contain meshes, paint and palette colors without printer, nozzle or print-profile settings; choose the printer and matching filament slots in your slicer.
+
+All 3MF targets follow the same clean contract: start from the processed meshes and numbered color regions, then export only that model data. Source metadata and printer/material/print settings are never copied. Region IDs remain distinct even when their display swatches match. Standard RGB swatches are only a convenience; assign actual materials, colors and tools in the receiving slicer. Prusa 3 exports have no configuration containers, and Orca exports do not add purge tables.
+
+Prusa and Bambu share paint codes only through slot 16. Higher slots are serialized separately. Native open/save tests check persistence; they do not by themselves prove that a slicer interpreted paint correctly. The compatibility tests also slice models painted with slots 16, 17 and 32 in PrusaSlicer 2.9.6 and check the tool used on actual extrusion moves.
+
 - **Native AMS & MMU Segmentation:** Writes `<m:colorgroup>`, `slic3rpe:mmu_segmentation`, and `paint_color` attributes directly onto the mesh.
 - **Feature-Aware Boundary Tracing:** Converts quantized texel boundaries into shared mesh contours instead of uniformly resampling the surface. Boundary Accuracy defaults to `0` for an exact processed texel outline; larger values opt into contour simplification with per-face paint-preservation checks.
 - **Seam-Safe Topology:** Traces colors with the texture's selected UV channel, propagates contour intersections across shared edges, then welds coincident vertices along UV seams. It preserves manifold input topology but is intentionally not a general mesh-repair tool.
@@ -103,7 +110,7 @@ Open `http://localhost:8080` in your browser.
    * Adjust **Despeckle** (e.g., `40–120 px`) to remove stray color dots and speckles.
    * Adjust **Boundary Smoothing** (e.g., `Level 2`) to round circular features like eyes and sharpen shell margins.
 5. **Set Size:** Enter your desired **Target Print Size** (e.g., `150` mm).
-6. **Export:** Set the top bar export dropdown to **`3MF (PrusaSlicer Multi-Color)`** and click **Export**.
+6. **Export:** Set the top bar export dropdown to **`3MF (Painted Model)`**, select the target **Slicer** in Print Detail, and click **Export**.
 7. **Slice:** Drop the `.3mf` into a compatible slicer such as **PrusaSlicer**, **Bambu Studio**, or **OrcaSlicer**. The model loads Z-up at the requested size, with its palette regions assigned to filament slots. Mesh defects already present in the source remain outside this app's scope.
 
 ---

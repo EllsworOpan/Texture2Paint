@@ -3379,6 +3379,13 @@ export async function applyLiveColorQuantizationAsync(
 }
 
 function getPrusaMmuHex(extruderId) {
+  if (extruderId < 3) return (extruderId * 4).toString(16).toUpperCase();
+  return extruderId <= 16
+    ? (extruderId - 3).toString(16).toUpperCase() + 'C'
+    : (extruderId - 17).toString(16).toUpperCase().padStart(2, '0') + 'EC';
+}
+
+function getBambuMmuHex(extruderId) {
   if (extruderId === 1) return '4';
   if (extruderId === 2) return '8';
   // TriangleSelector reserves F as a continuation nibble for states above 17.
@@ -4663,6 +4670,9 @@ export async function exportMultiColor3MF(
   paintResolutionMm = 0,
   paintOptions = {}
 ) {
+  const format = paintOptions?.format || 'prusa2-bambu';
+  if (!['prusa2-bambu', 'orca', 'prusa3'].includes(format)) throw new Error('Unknown 3MF export target.');
+  const prusa3 = format === 'prusa3';
   const refinePaintBoundaries = paintOptions?.refineBoundaries !== false;
   const overridePaintBudget = refinePaintBoundaries && paintOptions?.overrideBudget === true;
   const requestedAutomaticBudget = Number(paintOptions?.automaticTriangleBudget);
@@ -5311,17 +5321,21 @@ export async function exportMultiColor3MF(
 
   let allTrianglesXml = '';
   let emittedTriangleCount = 0;
+  let maxPaintSlot = 1;
+  const nativePaint = prusa3 && !paintOptions?.previewOnly ? [] : null;
   const previewTriangles = paintOptions?.previewOnly ? [] : null;
 
   function emitTriangle(v0, v1, v2, chosenColor) {
     const colorIdx = Math.max(0, Math.min(palette.length - 1, chosenColor));
     const colorIdx1Based = colorIdx + 1;
     const mmuHex = getPrusaMmuHex(colorIdx1Based);
-    // PrusaSlicer and Bambu/Orca use the same TriangleSelector hexadecimal
-    // bitstream; only the attribute name differs. A plain palette index in
-    // paint_color is decoded as a partial-triangle subdivision instruction.
+    // Prusa 2.9.6 and Bambu differ at slot 17. Orca 2.4.2 paints slots 1–16.
     if (!previewTriangles) {
-      allTrianglesXml += `<triangle v1="${v0}" v2="${v1}" v3="${v2}" slic3rpe:mmu_segmentation="${mmuHex}" paint_color="${mmuHex}" pid="1" p1="${colorIdx}" />\n`;
+      if (format === 'orca' && colorIdx1Based > 16)
+        throw new Error('OrcaSlicer 2.4.2 supports painted color slots 1–16. Reduce or reorder the palette, or choose PrusaSlicer / Bambu Studio.');
+      maxPaintSlot = Math.max(maxPaintSlot, colorIdx1Based);
+      nativePaint?.push({ triangle: emittedTriangleCount, dividing: mmuHex });
+      allTrianglesXml += `<triangle v1="${v0}" v2="${v1}" v3="${v2}" slic3rpe:mmu_segmentation="${mmuHex}" paint_color="${getBambuMmuHex(colorIdx1Based)}" pid="1" p1="${colorIdx}" />\n`;
     }
     emittedTriangleCount++;
   }
@@ -5422,6 +5436,9 @@ export async function exportMultiColor3MF(
   xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
   xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
   xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">
+  <metadata name="Application">Texture2Paint</metadata>
+  <metadata name="slic3rpe:Version3mf">1</metadata>
+  <metadata name="slic3rpe:MmPaintingVersion">${maxPaintSlot > 16 ? 2 : 1}</metadata>
   <resources>
     <m:colorgroup id="1">
       ${colorgroupXml}
@@ -5436,9 +5453,10 @@ export async function exportMultiColor3MF(
         </triangles>
       </mesh>
     </object>
+    ${prusa3 ? '<object id="3" type="model" name="Painted part"><components><component objectid="2"/></components></object><object id="4" type="model" name="Watertight_Multicolor_Model"><components><component objectid="3"/></components></object>' : ''}
   </resources>
   <build>
-    <item objectid="2" />
+    <item objectid="${prusa3 ? 4 : 2}" />
   </build>
 </model>`;
 
@@ -5446,6 +5464,7 @@ export async function exportMultiColor3MF(
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
   <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml" />
+  ${prusa3 ? '<Default Extension="json" ContentType="application/json" />' : ''}
 </Types>`;
 
   const relsXml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -5458,6 +5477,16 @@ export async function exportMultiColor3MF(
     '_rels/.rels': strToU8(relsXml),
     '3D/3dmodel.model': strToU8(modelXml)
   };
+  if (prusa3) {
+    archiveFiles['Metadata/PrusaSlicer3_project.json'] = strToU8(JSON.stringify({
+      project: { id: '00000000-0000-4000-8000-000000000001', version: 0 },
+      objects: [{ id: 4, object_settings: {}, volumes: [{ id: 3, type: 'ModelPart', volume_settings: {} }] }],
+      config_containers: [],
+    }));
+    archiveFiles['Metadata/Slic3r_facets_annotation.json'] = strToU8(JSON.stringify([
+      { id: 3, mmSegmentationFacetsVersion: maxPaintSlot > 16 ? 2 : 1, mmSegmentationFacets: nativePaint },
+    ]));
+  }
   return new Promise(resolve => {
     try {
       zip(archiveFiles, (error, archive) => {

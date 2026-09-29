@@ -1492,7 +1492,7 @@
       </svg>
     </button>
     <select id="format-select" class="format-select" aria-label="Export format">
-      <option value="3mf">3MF (PrusaSlicer Multi-Color)</option>
+      <option value="3mf">3MF (Painted Model)</option>
       <option value="glb">GLB</option>
       <option value="gltf">glTF</option>
       <option value="obj">OBJ</option>
@@ -1818,6 +1818,17 @@
             <span class="proc-tag">3MF</span>
           </div>
 
+          <div class="proc-label-row" style="margin-top: 4px;">
+            <label for="proc-3mf-target" class="proc-tag">Slicer</label>
+          </div>
+          <div class="select-wrapper" style="margin-bottom: 8px;">
+            <select id="proc-3mf-target" class="proc-select" aria-label="3MF target slicer">
+              <option value="prusa2-bambu">PrusaSlicer 2 / Bambu Studio</option>
+              <option value="orca">OrcaSlicer 2.4.2 (paint slots 1–16)</option>
+              <option value="prusa3">PrusaSlicer 3 (experimental, alpha12)</option>
+            </select>
+            <svg class="select-arrow" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z" /></svg>
+          </div>
           <div class="proc-label-row" style="margin-top: 4px;">
             <label for="proc-size-num" class="proc-tag">Target Print Size</label>
             <span style="font-size: 10px; color: var(--text-faint);">Max Dimension</span>
@@ -3108,6 +3119,7 @@
           smoothLevel,
           paintResolutionMm,
           {
+            format: $('proc-3mf-target').value,
             refineBoundaries: $refineBoundariesToggle.checked,
             overrideBudget: paintModePreference === 'override',
           }

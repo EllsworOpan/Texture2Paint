@@ -1106,7 +1106,7 @@ test('3MF writes the slicer TriangleSelector encoding to both paint attributes',
   assert.deepEqual(new Set(pairs.map(([encoding]) => encoding)), new Set(['4', '8', '0C']));
 });
 
-test('3MF TriangleSelector encoding uses continuation nibbles above extruder 17', async () => {
+test('3MF writes distinct current Prusa and Bambu encodings above slot 16', async () => {
   const labels = new Uint8Array([
     0, 16,
     17, 31,
@@ -1120,7 +1120,58 @@ test('3MF TriangleSelector encoding uses continuation nibbles above extruder 17'
   const encodings = new Set([...modelXml.matchAll(
     /slic3rpe:mmu_segmentation="([^"]+)"/g
   )].map(match => match[1]));
-  assert.deepEqual(encodings, new Set(['4', 'EC', '0FC', 'EFC']));
+  assert.deepEqual(encodings, new Set(['4', '00EC', '01EC', '0FEC']));
+  assert.deepEqual(new Set([...modelXml.matchAll(/paint_color="([^"]+)"/g)].map(m => m[1])), new Set(['4', 'EC', '0FC', 'EFC']));
+  assert.match(modelXml, /MmPaintingVersion">2</);
+});
+
+test('Orca target rejects used higher slots and accepts a large palette with only slot 16 painted', async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([16]), 1, 1);
+  root._quantizedPalette = Array.from({ length: 32 }, (_, i) => [i * 8, i * 8, i * 8]);
+  root.children[0].material._quantizedPalette = root._quantizedPalette;
+  await assert.rejects(() => exportedModelXml(root, 0, 10, { format: 'orca' }), /OrcaSlicer 2.4.2.*1–16/);
+  root.children[0].material._quantizedLabels[0] = 15;
+  assert.match(await exportedModelXml(root, 0, 10, { format: 'orca' }), /paint_color="DC"/);
+  await assert.rejects(() => exportedModelXml(root, 0, 10, { format: 'unknown' }), /target/);
+});
+
+test('Prusa 3 export carries native paint and volume identity without printer profiles', async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([0, 16, 17, 31]), 2, 2);
+  const palette = Array.from({ length: 32 }, (_, i) => [i * 8, i * 8, i * 8]);
+  root._quantizedPalette = root.children[0].material._quantizedPalette = palette;
+  const archive = await exportMultiColor3MF(root, 32, true, 10, false, palette, 0, 0, 0, { format: 'prusa3' });
+  const files = unzipSync(new Uint8Array(archive));
+  assert.equal(Object.keys(files).length, 5);
+  const project = JSON.parse(strFromU8(files['Metadata/PrusaSlicer3_project.json']));
+  assert.deepEqual(project.config_containers, []);
+  assert.deepEqual(project.objects, [{ id: 4, object_settings: {}, volumes: [{ id: 3, type: 'ModelPart', volume_settings: {} }] }]);
+  const [annotation] = JSON.parse(strFromU8(files['Metadata/Slic3r_facets_annotation.json']));
+  const model = strFromU8(files['3D/3dmodel.model']);
+  const triangles = [...model.matchAll(/slic3rpe:mmu_segmentation="([^"]+)"/g)];
+  assert.equal(annotation.id, 3);
+  assert.equal(annotation.mmSegmentationFacetsVersion, 2);
+  assert.deepEqual(annotation.mmSegmentationFacets, triangles.map((m, triangle) => ({ triangle, dividing: m[1] })));
+  assert.match(model, /<item objectid="4"/);
+  assert.match(model, /<component objectid="3"/);
+  assert.match(model, /<component objectid="2"/);
+  assert.doesNotMatch(Object.values(files).map(strFromU8).join('\n'), /nozzle_diameter|printer_settings|filament_diameter|print_settings/);
+});
+
+for (const format of ['prusa2-bambu', 'orca', 'prusa3']) test(`${format} export keeps distinct regions with identical swatches and excludes source settings`, async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([0, 1, 0, 1]), 2, 2);
+  const palette = [[255, 0, 0], [255, 0, 0]];
+  root._quantizedPalette = root.children[0].material._quantizedPalette = palette;
+  root.userData = { printer_settings: { nozzle_diameter: 0.8 }, print_settings: { perimeters: 7 }, virtual_extruders: [{ id: 2 }], gcode: 'M117 inherited setting' };
+  root.children[0].userData = { source_file: 'private/source/model.3mf', filament_settings: { temperature: 260 } };
+  const bytes = await exportMultiColor3MF(root, 2, true, 10, false, palette, 0, 0, 0, { format });
+  const files = unzipSync(new Uint8Array(bytes)), model = strFromU8(files['3D/3dmodel.model']);
+  const expected = ['[Content_Types].xml', '_rels/.rels', '3D/3dmodel.model'];
+  if (format === 'prusa3') expected.push('Metadata/PrusaSlicer3_project.json', 'Metadata/Slic3r_facets_annotation.json');
+  assert.deepEqual(Object.keys(files).sort(), expected.sort());
+  const regions = new Set([...model.matchAll(/slic3rpe:mmu_segmentation="([^"]+)"/g)].map(m => m[1]));
+  assert.deepEqual(regions, new Set(['4', '8']));
+  assert.doesNotMatch(Object.values(files).map(strFromU8).join('\n'), /printer_settings|nozzle_diameter|filament_settings|print_settings|virtual_extruders|source_file|inherited setting|flush_volumes/);
+  if (format === 'prusa3') assert.deepEqual(JSON.parse(strFromU8(files['Metadata/PrusaSlicer3_project.json'])).config_containers, []);
 });
 
 test('3MF tracing preserves the shared split sequence across UV seams', async () => {
