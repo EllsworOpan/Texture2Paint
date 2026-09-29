@@ -24,7 +24,7 @@ Textured 3D models (from 3D scanners, photogrammetry, game assets, or digital sc
 ### 🎨 Color Quantization & Custom Palette Tools
 - **Adjustable Palette Size:** Use the slider or enter any exact number of colors (e.g., 2, 4, 7, 9, 12).
 - **Real-Time 3D Viewport Preview:** Quantization uses an in-memory 5-bit 3D Color LUT and supports base-color textures, material colors, vertex colors, and instance colors.
-- **Interactive Swatch Editor & Eyedropper:** Click any color chip to open a color picker. Toggle quantization off to inspect the original texture and use your browser's eyedropper tool to sample colors directly from the 3D model.
+- **Guided Swatch Editor & Base-Color Dropper:** Click any color chip to use the full-spectrum picker, choose a perceptually ranked next color sampled from the model, or click the model with the base-color dropper. Model picks read the authored texture/material/vertex color and ignore viewport lighting, reflections, and exposure.
 - **Persistent Memory:** Toggling quantization on/off or expanding/trimming the color count preserves your custom color choices without resetting your work.
 - **Dedicated Resample Button:** Recompute the coverage-aware perceptual palette only when you explicitly request it.
 
@@ -48,6 +48,9 @@ Prusa and Bambu share paint codes only through slot 16. Higher slots are seriali
 
 - **Native AMS & MMU Segmentation:** Writes `<m:colorgroup>`, `slic3rpe:mmu_segmentation`, and `paint_color` attributes directly onto the mesh.
 - **Feature-Aware Boundary Tracing:** Converts quantized texel boundaries into shared mesh contours instead of uniformly resampling the surface. Boundary Accuracy defaults to `0` for an exact processed texel outline; larger values opt into contour simplification with per-face paint-preservation checks.
+- **Adaptive Paint Recommendation:** Forecasts painted 3MF growth from a stratified sample of the processed UV boundaries and reports headroom against a one-million-triangle recommendation. Over-budget projections automatically select existing-triangle painting. Users can explicitly override that choice; override exports have no application-imposed resource limit, never silently fall back, and report a failure if the requested refinement cannot be completed.
+- **Selectable 3MF Paint Geometry:** Trace Color Boundaries subdivides geometry along printable color contours for crisp boundaries. Existing-triangle mode adds no contour geometry and assigns one printable color to every current triangle. The viewport previews the selected 3MF representation; 3MF-only controls are hidden for other export formats.
+- **Attribute-Aware Simplification:** An optional Level of Detail control removes redundant geometry before contour generation. It is constrained by scale-independent geometric error—not a requested triangle count—and preserves UV channels, material groups, open borders, components, normals, and RGBA vertex colors. Skinned and morph-target geometry is left unchanged.
 - **Seam-Safe Topology:** Traces colors with the texture's selected UV channel, propagates contour intersections across shared edges, then welds coincident vertices along UV seams. It preserves manifold input topology but is intentionally not a general mesh-repair tool.
 - **Complete Authored Color Inputs:** Combines base-color texture alpha, alpha-map green, opacity, alpha test, vertex RGBA, material color, and instance color when assigning printable regions.
 - **Static Scene Bake:** Exports visible instances and the current morph/skinned pose, respects draw ranges, and corrects mirrored winding. Unsupported batched geometry and shader-defined surface color are rejected with an actionable error.
@@ -105,13 +108,14 @@ Open `http://localhost:8080` in your browser.
 2. **Quantize:** Open the **Processing** sidebar, switch **Enable Color Quantization** to **ON**, and set your desired number of filament colors (e.g. `4`).
 3. **Customize Palette (Optional):**
    * Click any color swatch to pick exact filament colors or enter hex values.
-   * Or, turn quantization **OFF**, click a swatch, select the eyedropper tool, and sample colors directly from the original model in the 3D viewport. Turn quantization back **ON** to apply.
+   * Or, click a swatch and choose **Pick from model**, then click the model. The sampled color comes from the authored surface rather than the lit screen pixel. The same editor also offers model-based suggested colors and a full-spectrum picker under **Choose any color**.
 4. **Clean Up:**
    * Adjust **Despeckle** (e.g., `40–120 px`) to remove stray color dots and speckles.
    * Adjust **Boundary Smoothing** (e.g., `Level 2`) to round circular features like eyes and sharpen shell margins.
-5. **Set Size:** Enter your desired **Target Print Size** (e.g., `150` mm).
-6. **Export:** Set the top bar export dropdown to **`3MF (Painted Model)`**, select the target **Slicer** in Print Detail, and click **Export**.
-7. **Slice:** Drop the `.3mf` into a compatible slicer such as **PrusaSlicer**, **Bambu Studio**, or **OrcaSlicer**. The model loads Z-up at the requested size, with its palette regions assigned to filament slots. Mesh defects already present in the source remain outside this app's scope.
+5. **Check Paint Geometry:** Review the projection beside the color controls. If it exceeds the recommendation, **Trace Color Boundaries** switches off automatically. Leave existing-triangle painting selected, reduce the estimate with simplification/despeckle/Boundary Accuracy, or turn tracing back on and accept the unrestricted-export warning.
+6. **Set Size:** Enter your desired **Target Print Size** (e.g., `150` mm).
+7. **Export:** Set the top bar export dropdown to **`3MF (Painted Model)`**, select the target **Slicer** in Print Detail, and click **Export**.
+8. **Slice:** Drop the `.3mf` into a compatible slicer such as **PrusaSlicer**, **Bambu Studio**, or **OrcaSlicer**. The model loads Z-up at the requested size, with its palette regions assigned to filament slots. Mesh defects already present in the source remain outside this app's scope.
 
 ---
 
@@ -122,7 +126,7 @@ Texture2Paint is a fork of the 3D browser viewer foundation developed by [Amal D
 ### Third-Party Libraries
 - [three.js](https://threejs.org/) — 3D scene graph, WebGL rendering, and format exporters (MIT)
 - [fflate](https://github.com/101arrowz/fflate) — High-performance client-side ZIP/3MF packaging (MIT)
-- [meshoptimizer](https://github.com/zeux/meshoptimizer) — Geometry decompression support (MIT)
+- [meshoptimizer](https://github.com/zeux/meshoptimizer) — Geometry decompression and attribute-aware simplification (MIT)
 
 ---
 
