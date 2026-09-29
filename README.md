@@ -133,3 +133,9 @@ Texture2Paint is a fork of the 3D browser viewer foundation developed by [Amal D
 ## License
 
 [MIT](./LICENSE)
+
+## Shared 3MF API
+
+3MF reading, writing, paint encoding, target capabilities and slicer setting mappings live in the sibling **ThreeMFKit** project. This app consumes its checked-in browser build under `src/vendor/three-mf`; publishing needs no sibling checkout, package server or extra network dependency. App geometry processing stays here. Make format fixes in ThreeMFKit, then run its `npm run build` and `npm run sync -- --verify` to copy and test the same build in all three apps. The script refuses manual vendor edits and defaults to copying only. Use `npm run sync -- --commit --dry-run` to preview an update without writing files or changing Git; `npm run sync -- --commit` copies, verifies all apps and commits only managed API files with a standardized message. It never pushes. For the initial migration, app integration changes outside the vendor folder must also be committed before release.
+
+The API retains source archives for same-format updates, cleanly replaces edited models, and supports cross-format conversion through clean export. Region numbers stay separate even when display colors match. See the library's README and format evidence for the document model and preservation rules.

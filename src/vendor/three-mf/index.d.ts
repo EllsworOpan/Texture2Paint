@@ -1,0 +1,11 @@
+export { readDocument, editDocument, createDocument, originalBytes, replacePart, compareDocument, validateDocument, writeDocument, worldParts, resolvePart, identity, } from "./document";
+export type { Target, Paint, Role, PrintOverrides, Mesh, Part, Model, Document, Change, ExportResult, } from "./document";
+export { TARGETS, DEFAULT_TARGET, getTarget, outputTarget, SLICER_NAMES, preferredPaintTarget, paintTargets, noticesForMode, } from "./targets.js";
+export { DEFAULT_COLORS } from "./reader.js";
+export { resolvePaint } from "./paint.js";
+export { appendParts } from "./append";
+export { geometryView, fromGeometryView } from "./geometry-view";
+export type { GeometryView, GeometryObject } from "./geometry-view";
+export type { Addition, AppendOptions } from "./append";
+export { DEFAULT_LIMITS } from "./limits";
+export type { ProcessingLimits, LimitOptions } from "./limits";

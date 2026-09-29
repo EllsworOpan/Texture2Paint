@@ -3,3 +3,5 @@ node_modules/
 *.meshy
 *.glb
 tests/fixtures/
+examples
+.tmp

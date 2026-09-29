@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { zip, zipSync, strToU8 } from 'fflate';
+import { createDocument, writeDocument, identity, getTarget } from './vendor/three-mf/index.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
@@ -3378,25 +3378,6 @@ export async function applyLiveColorQuantizationAsync(
   return palette;
 }
 
-function getPrusaMmuHex(extruderId) {
-  if (extruderId < 3) return (extruderId * 4).toString(16).toUpperCase();
-  return extruderId <= 16
-    ? (extruderId - 3).toString(16).toUpperCase() + 'C'
-    : (extruderId - 17).toString(16).toUpperCase().padStart(2, '0') + 'EC';
-}
-
-function getBambuMmuHex(extruderId) {
-  if (extruderId === 1) return '4';
-  if (extruderId === 2) return '8';
-  // TriangleSelector reserves F as a continuation nibble for states above 17.
-  // The string is nibble-reversed on disk, so Extruder18 is 0FC (not FC),
-  // Extruder19 is 1FC, and so on through the app's 32-color limit.
-  const extendedState = extruderId - 3;
-  const continuationCount = Math.floor(extendedState / 15);
-  const remainder = extendedState % 15;
-  return remainder.toString(16).toUpperCase() + 'F'.repeat(continuationCount) + 'C';
-}
-
 const PAINT_TRACE_EPSILON = 1e-9;
 const MAX_PAINT_BOUNDARY_SCAN_STEPS = 100000000;
 const MAX_PAINT_BOUNDARY_SEGMENTS = 2000000;
@@ -4670,9 +4651,7 @@ export async function exportMultiColor3MF(
   paintResolutionMm = 0,
   paintOptions = {}
 ) {
-  const format = paintOptions?.format || 'prusa2-bambu';
-  if (!['prusa2-bambu', 'orca', 'prusa3'].includes(format)) throw new Error('Unknown 3MF export target.');
-  const prusa3 = format === 'prusa3';
+  const target = getTarget(paintOptions?.format || 'universal');
   const refinePaintBoundaries = paintOptions?.refineBoundaries !== false;
   const overridePaintBudget = refinePaintBoundaries && paintOptions?.overrideBudget === true;
   const requestedAutomaticBudget = Number(paintOptions?.automaticTriangleBudget);
@@ -5319,23 +5298,16 @@ export async function exportMultiColor3MF(
     return idx;
   }
 
-  let allTrianglesXml = '';
+  const emittedTriangles = [], regionPaint = [];
   let emittedTriangleCount = 0;
-  let maxPaintSlot = 1;
-  const nativePaint = prusa3 && !paintOptions?.previewOnly ? [] : null;
   const previewTriangles = paintOptions?.previewOnly ? [] : null;
 
   function emitTriangle(v0, v1, v2, chosenColor) {
     const colorIdx = Math.max(0, Math.min(palette.length - 1, chosenColor));
     const colorIdx1Based = colorIdx + 1;
-    const mmuHex = getPrusaMmuHex(colorIdx1Based);
-    // Prusa 2.9.6 and Bambu differ at slot 17. Orca 2.4.2 paints slots 1–16.
     if (!previewTriangles) {
-      if (format === 'orca' && colorIdx1Based > 16)
-        throw new Error('OrcaSlicer 2.4.2 supports painted color slots 1–16. Reduce or reorder the palette, or choose PrusaSlicer / Bambu Studio.');
-      maxPaintSlot = Math.max(maxPaintSlot, colorIdx1Based);
-      nativePaint?.push({ triangle: emittedTriangleCount, dividing: mmuHex });
-      allTrianglesXml += `<triangle v1="${v0}" v2="${v1}" v3="${v2}" slic3rpe:mmu_segmentation="${mmuHex}" paint_color="${getBambuMmuHex(colorIdx1Based)}" pid="1" p1="${colorIdx}" />\n`;
+      emittedTriangles.push(v0,v1,v2);
+      regionPaint.push({region:colorIdx1Based});
     }
     emittedTriangleCount++;
   }
@@ -5422,80 +5394,11 @@ export async function exportMultiColor3MF(
     return preview;
   }
 
-  let verticesXml = '';
-  for (let i = 0; i < weldedVertices.length; i++) {
-    const v = weldedVertices[i];
-    verticesXml += `<vertex x="${v[0].toFixed(exportCoordinateDecimals)}" y="${v[1].toFixed(exportCoordinateDecimals)}" z="${v[2].toFixed(exportCoordinateDecimals)}" />\n`;
-  }
-
-  const toHex = c => c.map(v => v.toString(16).padStart(2, '0')).join('').toUpperCase();
-  const colorgroupXml = palette.map(p => `<m:color color="#${toHex(p)}FF" />`).join('\n      ');
-
-  const modelXml = `<?xml version="1.0" encoding="UTF-8"?>
-<model unit="millimeter" xml:lang="en-US"
-  xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
-  xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
-  xmlns:slic3rpe="http://schemas.slic3r.org/3mf/2017/06">
-  <metadata name="Application">Texture2Paint</metadata>
-  <metadata name="slic3rpe:Version3mf">1</metadata>
-  <metadata name="slic3rpe:MmPaintingVersion">${maxPaintSlot > 16 ? 2 : 1}</metadata>
-  <resources>
-    <m:colorgroup id="1">
-      ${colorgroupXml}
-    </m:colorgroup>
-    <object id="2" type="model" name="Watertight_Multicolor_Model">
-      <mesh>
-        <vertices>
-          ${verticesXml}
-        </vertices>
-        <triangles>
-          ${allTrianglesXml}
-        </triangles>
-      </mesh>
-    </object>
-    ${prusa3 ? '<object id="3" type="model" name="Painted part"><components><component objectid="2"/></components></object><object id="4" type="model" name="Watertight_Multicolor_Model"><components><component objectid="3"/></components></object>' : ''}
-  </resources>
-  <build>
-    <item objectid="${prusa3 ? 4 : 2}" />
-  </build>
-</model>`;
-
-  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
-  <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml" />
-  ${prusa3 ? '<Default Extension="json" ContentType="application/json" />' : ''}
-</Types>`;
-
-  const relsXml = `<?xml version="1.0" encoding="UTF-8"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" />
-</Relationships>`;
-
-  const archiveFiles = {
-    '[Content_Types].xml': strToU8(contentTypesXml),
-    '_rels/.rels': strToU8(relsXml),
-    '3D/3dmodel.model': strToU8(modelXml)
-  };
-  if (prusa3) {
-    archiveFiles['Metadata/PrusaSlicer3_project.json'] = strToU8(JSON.stringify({
-      project: { id: '00000000-0000-4000-8000-000000000001', version: 0 },
-      objects: [{ id: 4, object_settings: {}, volumes: [{ id: 3, type: 'ModelPart', volume_settings: {} }] }],
-      config_containers: [],
-    }));
-    archiveFiles['Metadata/Slic3r_facets_annotation.json'] = strToU8(JSON.stringify([
-      { id: 3, mmSegmentationFacetsVersion: maxPaintSlot > 16 ? 2 : 1, mmSegmentationFacets: nativePaint },
-    ]));
-  }
-  return new Promise(resolve => {
-    try {
-      zip(archiveFiles, (error, archive) => {
-        resolve((error ? zipSync(archiveFiles) : archive).buffer);
-      });
-    } catch {
-      resolve(zipSync(archiveFiles).buffer);
-    }
-  });
+  const toHex = c => '#' + c.map(v => v.toString(16).padStart(2, '0')).join('').toUpperCase();
+  const name = 'Watertight_Multicolor_Model';
+  const mesh = {vertices:weldedVertices.flatMap(v=>v.map(n=>Number(n.toFixed(exportCoordinateDecimals)))),triangles:emittedTriangles};
+  const modelDocument = createDocument([{id:'model',name,printable:true,transform:identity(),overrides:{},parts:[{id:'model/paint',name,kind:'ModelPart',mesh,paint:regionPaint,transform:identity(),overrides:{}}]}],palette.map(toHex));
+  return writeDocument(modelDocument,{mode:'create',target:target.id,limits:overridePaintBudget?{maxSourceTriangles:Infinity,maxPaintNodes:Infinity}:undefined}).bytes.buffer;
 }
 
 function textureHasTransparentPixels(texture) {

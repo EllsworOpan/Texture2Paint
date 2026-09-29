@@ -1,0 +1,3 @@
+import type { SlicerFormat } from "./compat/types";
+import type { LimitOptions } from "./limits";
+export declare function createFiles(document: any, format: SlicerFormat, limits?: LimitOptions): Record<string, Uint8Array>;

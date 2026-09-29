@@ -1823,9 +1823,6 @@
           </div>
           <div class="select-wrapper" style="margin-bottom: 8px;">
             <select id="proc-3mf-target" class="proc-select" aria-label="3MF target slicer">
-              <option value="prusa2-bambu">PrusaSlicer 2 / Bambu Studio</option>
-              <option value="orca">OrcaSlicer 2.4.2 (paint slots 1–16)</option>
-              <option value="prusa3">PrusaSlicer 3 (experimental, alpha12)</option>
             </select>
             <svg class="select-arrow" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z" /></svg>
           </div>
@@ -1994,6 +1991,8 @@
 
   <script type="module">
     import * as THREE from 'three';
+    import { paintTargets } from './src/vendor/three-mf/index.js';
+    document.getElementById('proc-3mf-target').replaceChildren(...paintTargets().map(t=>new Option(t.name,t.id)));
     import { meshyToGlb, isMeshyFile, isGlbFile } from './src/decrypt.js';
     import { decompressGlb } from './src/decompress.js';
     import { Viewer, disposeModelResources } from './src/viewer.js';
