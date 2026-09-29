@@ -5,7 +5,7 @@ import {
   keys,
   list,
   record
-} from "./chunk-VJ5CQIRI.js";
+} from "./chunk-UNJW77SA.js";
 import {
   settingsFor,
   writeApplicationMetadata
@@ -92,7 +92,7 @@ function archive(files, modelPath, modelDocument) {
       fail("Mixed slicer metadata cannot be updated safely.");
   }
   const data = record(
-    json(files[PROJECT], "PrusaSlicer 3 project"),
+    json(files[PROJECT], "PrusaSlicer 3.x project"),
     "project file"
   );
   keys(data, ["objects", "project", "config_containers"], "project");
@@ -267,7 +267,7 @@ function importPrusa3Project(name, files, modelPath, modelDocument) {
     transform: matrix(i.item.getAttribute("transform")).toArray(),
     parts: i.parts
   }));
-  const warnings = ["Experimental PrusaSlicer 3.0.0-alpha12 support."];
+  const warnings = ["Experimental PrusaSlicer 3.x support."];
   if (!objects.length) warnings.push("No printable model objects were found.");
   const effective = (key) => a.containers.flatMap((container) => {
     const config = configuration(container.configuration), print = record(config.print_settings, "print settings"), tool = record(config.toolprint_settings, "tool settings");

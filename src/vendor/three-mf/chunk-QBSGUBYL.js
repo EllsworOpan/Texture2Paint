@@ -8,13 +8,13 @@ import {
 import {
   exportPrusa3Project,
   importPrusa3Project
-} from "./chunk-7GFLZDB2.js";
+} from "./chunk-J7ABM23C.js";
 import {
   detectThreeMfDialect
 } from "./chunk-W7EBKI6N.js";
 import {
   readPrusaPaint
-} from "./chunk-Z7LE44R4.js";
+} from "./chunk-DHSJONSU.js";
 import {
   export3mf
 } from "./chunk-2SPQVFJA.js";
@@ -252,9 +252,7 @@ function readDocumentData(buffer, filename = "Model.3mf", progress = (_message) 
     }
   };
   if (prusa3) {
-    warnings.push(
-      "Experimental PrusaSlicer 3 paint import (validated with 3.0.0-alpha12)."
-    );
+    warnings.push("Experimental PrusaSlicer 3.x paint import.");
     if (prusa3.flattenedRecipes)
       warnings.push(
         "Blend and gradient assignments were kept as flat color regions. Their mixing recipes were discarded; assign materials to these region numbers in the slicer."
@@ -306,7 +304,7 @@ function readDocumentData(buffer, filename = "Model.3mf", progress = (_message) 
   const bambuConfig = read("Metadata/model_settings.config");
   if (prusa3 && (prusaConfig || bambuConfig))
     throw new Error(
-      "Mixed PrusaSlicer 3 and legacy object metadata is ambiguous. Save the project in its slicer first."
+      "Mixed PrusaSlicer 3.x and legacy object metadata is ambiguous. Save the project in its slicer first."
     );
   if (bambuConfig)
     for (const o of descendants(xml2(bambuConfig), "object")) {
@@ -358,7 +356,7 @@ function readDocumentData(buffer, filename = "Model.3mf", progress = (_message) 
     )?.textContent || "";
     if (/^PrusaSlicer[-\s]+(?:[3-9]|\d{2,})\./i.test(application) && !prusa3)
       throw new Error(
-        "Unsupported PrusaSlicer 3.0 project: missing project/paint metadata. Save an editable 3MF in PrusaSlicer first."
+        "Unsupported PrusaSlicer 3.x project: missing project/paint metadata. Save an editable 3MF in PrusaSlicer first."
       );
     const unit = {
       micron: 1e-3,
@@ -450,7 +448,7 @@ function readDocumentData(buffer, filename = "Model.3mf", progress = (_message) 
         throw new Error("Part settings do not match the 3MF components.");
       if (part?.paint && refs.length !== 1)
         throw new Error(
-          "PrusaSlicer 3 paint must refer to a single mesh per volume."
+          "PrusaSlicer 3.x paint must refer to a single mesh per volume."
         );
       for (const [index, c] of refs.entries()) {
         const nextPath = attr(c, "path") ? packagePath(attr(c, "path"), path) : path;
@@ -486,7 +484,7 @@ function readDocumentData(buffer, filename = "Model.3mf", progress = (_message) 
     if (sourceTriangles > limits.maxSourceTriangles)
       budgetError("Source triangle count", "maxSourceTriangles");
     if (part?.paint && [...part.paint.keys()].some((i) => i >= triangles.length))
-      throw new Error("PrusaSlicer 3 paint references a missing triangle.");
+      throw new Error("PrusaSlicer 3.x paint references a missing triangle.");
     const groups = settings?.volumes.length ? settings.volumes : [{ first: 0, last: triangles.length - 1, meta: {} }];
     let nextTriangle = 0;
     for (const group of [...groups].sort((a, b) => a.first - b.first)) {
@@ -623,14 +621,14 @@ function readDocumentData(buffer, filename = "Model.3mf", progress = (_message) 
     for (const [index, instance] of prusa3.instances) {
       if (!items[index] || items[index].getAttribute("objectid") !== instance.id)
         throw new Error(
-          "PrusaSlicer 3 instance metadata does not match the build."
+          "PrusaSlicer 3.x instance metadata does not match the build."
         );
     }
   for (const [index, item] of items.entries()) {
     const printable = !["0", "false"].includes(item.getAttribute("printable")) && prusa3?.instances.get(index)?.printable !== false;
     const itemPath = attr(item, "path") ? packagePath(attr(item, "path"), root) : root;
     if (prusa3 && (itemPath !== root || !objectSettings.has(item.getAttribute("objectid"))))
-      throw new Error("Missing PrusaSlicer 3 object metadata.");
+      throw new Error("Missing PrusaSlicer 3.x object metadata.");
     const scale = model(itemPath).unit / rootData.unit;
     currentObject = {
       id: "object-" + index,
@@ -949,10 +947,10 @@ var TARGETS = Object.freeze([
   Object.freeze({ id: "prusa", name: "PrusaSlicer 2.x", maxPaintRegions: 255 }),
   Object.freeze({
     id: "prusa3",
-    name: "PrusaSlicer 3.0 alpha12",
+    name: "PrusaSlicer 3.x",
     maxPaintRegions: 255,
     experimental: true,
-    note: "Experimental: tested with PrusaSlicer 3.0.0-alpha12.",
+    note: "Experimental support for PrusaSlicer 3.x projects.",
     cleanNote: "Blend and gradient assignments become flat color regions. Their mixing recipes and printer configuration are discarded."
   }),
   Object.freeze({ id: "bambu", name: "Bambu Studio", maxPaintRegions: 255 }),

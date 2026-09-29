@@ -10,7 +10,7 @@ var roles = /* @__PURE__ */ new Set([
 ]);
 var fail = (message) => {
   throw new Error(
-    `Unsupported PrusaSlicer 3.0 project: invalid paint project: ${message}`
+    `Unsupported PrusaSlicer 3.x project: invalid paint project: ${message}`
   );
 };
 function record(value) {

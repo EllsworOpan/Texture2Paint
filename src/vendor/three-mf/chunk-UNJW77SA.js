@@ -1,8 +1,6 @@
 // src/compat/prusa3-config.ts
 var fail = (reason) => {
-  throw new Error(
-    `Unsupported PrusaSlicer 3.0 project: ${reason} Supported format: 3.0.0-alpha12 FFF.`
-  );
+  throw new Error(`Unsupported PrusaSlicer 3.x project: ${reason}`);
 };
 function record(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value))

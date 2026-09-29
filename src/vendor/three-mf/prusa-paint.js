@@ -1,6 +1,6 @@
 import {
   readPrusaPaint
-} from "./chunk-Z7LE44R4.js";
+} from "./chunk-DHSJONSU.js";
 import "./chunk-JSBRDJBE.js";
 export {
   readPrusaPaint
