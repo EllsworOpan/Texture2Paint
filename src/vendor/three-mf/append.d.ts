@@ -13,6 +13,7 @@ export interface AppendOptions {
         data: unknown;
     };
     limits?: import("./limits").LimitOptions;
+    virtualExtruders?: import("./virtual-extruders").VirtualExtruderOptions;
 }
 /** Attach independently generated parts without rewriting original faces.
  * The native append optimization is only used after exact baseline comparison.

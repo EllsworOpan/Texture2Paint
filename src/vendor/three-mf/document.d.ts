@@ -1,4 +1,5 @@
 import { type LimitOptions } from "./limits";
+import type { VirtualExtruderOptions, VirtualExtruderPlan } from "./virtual-extruders";
 export type Target = "universal" | "prusa" | "prusa3" | "bambu" | "orca";
 export type Paint = {
     region: number;
@@ -70,6 +71,15 @@ export interface ExportResult {
     changes: Change[];
     warnings: string[];
     droppedPaths: string[];
+    /** Present only for opt-in virtual export; maps source regions to native IDs. */
+    virtualExtruders?: VirtualExtruderPlan;
+}
+export interface WriteOptions {
+    mode: "create" | "update";
+    target?: Target;
+    limits?: LimitOptions;
+    /** Create-only ColorMix export. Omit to retain the existing physical-region workflow. */
+    virtualExtruders?: VirtualExtruderOptions;
 }
 export declare const identity: () => import("three").Matrix4Tuple;
 export declare function readDocument(input: ArrayBuffer | Uint8Array, name?: string, progress?: (_message: string) => void, options?: {
@@ -97,10 +107,6 @@ export declare function worldParts(document: Document, { printableOnly }?: {
 }[];
 /** Expand partial-face paint only when the consuming algorithm needs geometry. */
 export declare function resolvePart(part: ReturnType<typeof worldParts>[number], options?: LimitOptions): any[];
-export declare function writeDocument(document: Document, options: {
-    mode: "create" | "update";
-    target?: Target;
-    limits?: LimitOptions;
-}): ExportResult;
+export declare function writeDocument(document: Document, options: WriteOptions): ExportResult;
 /** Internal compatibility boundary for the existing native append writers. */
 export declare function sourceContext(document: Document): any;

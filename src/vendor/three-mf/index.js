@@ -3,6 +3,7 @@ import {
   DEFAULT_TARGET,
   SLICER_NAMES,
   TARGETS,
+  VIRTUAL_EXTRUDER_PALETTE,
   compareDocument,
   createDocument,
   editDocument,
@@ -14,6 +15,7 @@ import {
   originalBytes,
   outputTarget,
   paintTargets,
+  planVirtualExtruders,
   preferredPaintTarget,
   readDocument,
   replacePart,
@@ -22,7 +24,7 @@ import {
   validateDocument,
   worldParts,
   writeDocument
-} from "./chunk-QBSGUBYL.js";
+} from "./chunk-N2OW6ED6.js";
 import "./chunk-JKOOODL2.js";
 import "./chunk-563TAMUL.js";
 import "./chunk-J7ABM23C.js";
@@ -86,7 +88,7 @@ function appendParts(document, additions, options) {
   const plain = additions.every(
     (a) => a.part.kind === "ModelPart" && a.part.defaultRegion === void 0 && a.part.paint.every((t) => "region" in t && t.region === 0)
   ) && new Set(additions.map((a) => a.objectId)).size === additions.length;
-  if (plain && !compareDocument(document).length && source && target !== "universal" && target === outputTarget(document.format) && JSON.stringify(document.palette) === JSON.stringify(source.baseline.palette)) {
+  if (plain && options.virtualExtruders === void 0 && !compareDocument(document).length && source && target !== "universal" && target === outputTarget(document.format) && JSON.stringify(document.palette) === JSON.stringify(source.baseline.palette)) {
     let project;
     try {
       project = importProject(document.name, source.bytes.buffer, limits);
@@ -135,7 +137,12 @@ function appendParts(document, additions, options) {
       };
     }
   }
-  const result = writeDocument(edited, { mode: options.mode, target, limits });
+  const result = writeDocument(edited, {
+    mode: options.mode,
+    target,
+    limits,
+    virtualExtruders: options.virtualExtruders
+  });
   if (options.applicationMetadata) {
     const files = unzipSync(result.bytes);
     writeApplicationMetadata(files, options.applicationMetadata);
@@ -234,6 +241,7 @@ export {
   DEFAULT_TARGET,
   SLICER_NAMES,
   TARGETS,
+  VIRTUAL_EXTRUDER_PALETTE,
   appendParts,
   compareDocument,
   createDocument,
@@ -246,6 +254,7 @@ export {
   originalBytes,
   outputTarget,
   paintTargets,
+  planVirtualExtruders,
   preferredPaintTarget,
   readDocument,
   replacePart,

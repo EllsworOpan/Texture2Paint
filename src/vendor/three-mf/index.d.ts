@@ -1,5 +1,7 @@
 export { readDocument, editDocument, createDocument, originalBytes, replacePart, compareDocument, validateDocument, writeDocument, worldParts, resolvePart, identity, } from "./document";
-export type { Target, Paint, Role, PrintOverrides, Mesh, Part, Model, Document, Change, ExportResult, } from "./document";
+export type { Target, Paint, Role, PrintOverrides, Mesh, Part, Model, Document, Change, ExportResult, WriteOptions, } from "./document";
+export { VIRTUAL_EXTRUDER_PALETTE, planVirtualExtruders, } from "./virtual-extruders";
+export type { BlendComponent, RegionRecipe, VirtualExtruderOptions, VirtualRegion, VirtualExtruderPlan, } from "./virtual-extruders";
 export { TARGETS, DEFAULT_TARGET, getTarget, outputTarget, SLICER_NAMES, preferredPaintTarget, paintTargets, noticesForMode, } from "./targets.js";
 export { DEFAULT_COLORS } from "./reader.js";
 export { resolvePaint } from "./paint.js";

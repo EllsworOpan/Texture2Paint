@@ -145,6 +145,43 @@ var Archive = class {
 // src/reader.js
 var import_xmldom = __toESM(require_lib(), 1);
 import { Matrix4, Vector3 } from "three";
+
+// src/prusa-virtual.js
+var FULL_SPECTRUM_PATH = "Metadata/Prusa_Slicer_full_spectrum.json";
+function readPrusaVirtualPalette(read, palette, fallbackColors) {
+  const text = read(FULL_SPECTRUM_PATH);
+  if (text === null) return [];
+  try {
+    const data = JSON.parse(text);
+    if (data.version !== 1 || !Array.isArray(data.virtual_extruders))
+      throw new Error("Unknown ColorMix metadata.");
+    const colors = /* @__PURE__ */ new Map(), seen = /* @__PURE__ */ new Set();
+    for (const entry of [
+      ...Array.isArray(data.physical_extruders) ? data.physical_extruders : [],
+      ...data.virtual_extruders
+    ]) {
+      if (!entry || !Number.isInteger(entry.id) || entry.id < 1 || entry.id > 255 || seen.has(entry.id))
+        throw new Error("Invalid ColorMix slot.");
+      seen.add(entry.id);
+      if (typeof entry.color === "string" && /^#[\da-f]{6}$/i.test(entry.color))
+        colors.set(entry.id, entry.color);
+    }
+    for (const [id, color] of colors) {
+      while (palette.length < id)
+        palette.push(fallbackColors[palette.length % fallbackColors.length]);
+      palette[id - 1] = color;
+    }
+    return data.virtual_extruders.length ? [
+      "Virtual extruders were retained as separate color regions. Update export preserves their source recipes; create export needs virtualExtruders to regenerate recipes."
+    ] : [];
+  } catch {
+    return [
+      "Unreadable ColorMix display metadata was ignored. Region numbers are retained; verify colors and recipes before printing."
+    ];
+  }
+}
+
+// src/reader.js
 var DEFAULT_COLORS = [
   "#70C6B4",
   "#F2AD60",
@@ -268,6 +305,8 @@ function readDocumentData(buffer, filename = "Model.3mf", progress = (_message) 
   const config = read("Metadata/Slic3r_PE.config") || "";
   const colors = config.match(/^;?\s*extruder_colour\s*=\s*(.+)$/m)?.[1] || config.match(/^;?\s*filament_colour\s*=\s*(.+)$/m)?.[1];
   if (!palette.length && colors) setPalette(colors.split(";"));
+  if (!prusa3)
+    warnings.push(...readPrusaVirtualPalette(read, palette, DEFAULT_COLORS));
   const bambuSettings = read("Metadata/project_settings.config");
   if (!palette.length && bambuSettings)
     try {
@@ -712,7 +751,7 @@ var unsupported = (reason) => {
   );
 };
 var transformText = (m) => m.elements.filter((_, i) => i % 4 !== 3).join(" ");
-function createFiles(document, format, limits = {}) {
+function createFiles(document, format, limits = {}, options = {}) {
   let paintingVersion = 1;
   const objects = document.objects.map((o) => ({
     ...o,
@@ -787,6 +826,7 @@ function createFiles(document, format, limits = {}) {
   };
   if (format === "prusa3") metadata("Application", "PrusaSlicer-3.0.0-alpha12");
   else if (format === "prusa") {
+    if (options.application) metadata("Application", options.application);
     metadata("slic3rpe:Version3mf", "1");
     metadata("slic3rpe:MmPaintingVersion", String(paintingVersion));
   } else {
@@ -942,22 +982,37 @@ var TARGETS = Object.freeze([
     id: "universal",
     name: "PrusaSlicer 2 / Bambu Studio",
     maxPaintRegions: 255,
+    supportsVirtualExtruders: false,
     flatOnly: true
   }),
-  Object.freeze({ id: "prusa", name: "PrusaSlicer 2.x", maxPaintRegions: 255 }),
+  Object.freeze({
+    id: "prusa",
+    name: "PrusaSlicer 2.x",
+    maxPaintRegions: 255,
+    supportsVirtualExtruders: true,
+    virtualExtruderNote: "Requires PrusaSlicer 2.9.6 or later and Open Project. Use the physical slot count of the destination printer."
+  }),
   Object.freeze({
     id: "prusa3",
     name: "PrusaSlicer 3.x",
     maxPaintRegions: 255,
     experimental: true,
+    supportsVirtualExtruders: false,
+    virtualExtruderNote: "Virtual extruder creation is not yet validated for the PrusaSlicer 3.x JSON project format. Export with the prusa target for PrusaSlicer 2.9.6.",
     note: "Experimental support for PrusaSlicer 3.x projects.",
     cleanNote: "Blend and gradient assignments become flat color regions. Their mixing recipes and printer configuration are discarded."
   }),
-  Object.freeze({ id: "bambu", name: "Bambu Studio", maxPaintRegions: 255 }),
+  Object.freeze({
+    id: "bambu",
+    name: "Bambu Studio",
+    maxPaintRegions: 255,
+    supportsVirtualExtruders: false
+  }),
   Object.freeze({
     id: "orca",
     name: "OrcaSlicer 2.4.2 (paint slots 1\u201316)",
-    maxPaintRegions: 16
+    maxPaintRegions: 16,
+    supportsVirtualExtruders: false
   })
 ]);
 var DEFAULT_TARGET = "prusa";
@@ -970,7 +1025,9 @@ function getTarget(id) {
 }
 var outputTarget = (format) => !format || format === "generic" ? DEFAULT_TARGET : getTarget(format).id;
 var preferredPaintTarget = (format) => ["orca", "prusa3"].includes(format) ? format : "universal";
-var paintTargets = () => TARGETS.filter((t) => ["universal", "orca", "prusa3"].includes(t.id));
+var paintTargets = ({ virtualExtruders = false } = {}) => TARGETS.filter(
+  (t) => virtualExtruders ? t.supportsVirtualExtruders : ["universal", "orca", "prusa3"].includes(t.id)
+);
 var noticesForMode = (warnings, mode) => warnings.map(
   (w) => mode === "create" && w.startsWith("Material slots and virtual extruders are preserved.") ? "Color-region numbers are retained. Virtual-material recipes are discarded by clean export." : w
 );
@@ -1002,7 +1059,8 @@ function updateFiles(document, source, changes, target, limits = {}) {
     "Metadata/Slic3r_PE_model.config",
     "Metadata/model_settings.config",
     PROJECT_PATH,
-    PAINT_PATH
+    PAINT_PATH,
+    ...target === "prusa" ? [FULL_SPECTRUM_PATH] : []
   ];
   const keep = new Set(known.map((p) => pathFor(p)));
   const files = archive.extract(
@@ -1242,6 +1300,422 @@ function updateFiles(document, source, changes, target, limits = {}) {
   return { files, warnings, droppedPaths };
 }
 
+// src/vendor/prusa-fdm-mixer/color.ts
+function hexToRgb(hex) {
+  const h = hex.replace("#", "");
+  return {
+    r: parseInt(h.substring(0, 2), 16),
+    g: parseInt(h.substring(2, 4), 16),
+    b: parseInt(h.substring(4, 6), 16)
+  };
+}
+function rgbToHex(rgb) {
+  const c = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+  return "#" + c(rgb.r) + c(rgb.g) + c(rgb.b);
+}
+function srgbToLinear(c) {
+  const v = c / 255;
+  return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+}
+function linearToSrgb(c) {
+  const x = Math.max(0, Math.min(1, c));
+  const v = x <= 31308e-7 ? 12.92 * x : 1.055 * Math.pow(x, 1 / 2.4) - 0.055;
+  return v * 255;
+}
+function rgbToXyz(rgb) {
+  const r = srgbToLinear(rgb.r);
+  const g = srgbToLinear(rgb.g);
+  const b = srgbToLinear(rgb.b);
+  return {
+    x: r * 0.4124564 + g * 0.3575761 + b * 0.1804375,
+    y: r * 0.2126729 + g * 0.7151522 + b * 0.072175,
+    z: r * 0.0193339 + g * 0.119192 + b * 0.9503041
+  };
+}
+function xyzToLab(x, y, z) {
+  const xn = 0.95047;
+  const yn = 1;
+  const zn = 1.08883;
+  const f = (t) => t > 8856e-6 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
+  const fx = f(x / xn);
+  const fy = f(y / yn);
+  const fz = f(z / zn);
+  return {
+    L: 116 * fy - 16,
+    a: 500 * (fx - fy),
+    b: 200 * (fy - fz)
+  };
+}
+function labToXyz(lab) {
+  const xn = 0.95047;
+  const yn = 1;
+  const zn = 1.08883;
+  const fy = (lab.L + 16) / 116;
+  const fx = lab.a / 500 + fy;
+  const fz = fy - lab.b / 200;
+  const finv = (t) => Math.pow(t, 3) > 8856e-6 ? Math.pow(t, 3) : (t - 16 / 116) / 7.787;
+  return { x: xn * finv(fx), y: yn * finv(fy), z: zn * finv(fz) };
+}
+function xyzToRgb(x, y, z) {
+  return {
+    r: linearToSrgb(x * 3.2404542 + y * -1.5371385 + z * -0.4985314),
+    g: linearToSrgb(x * -0.969266 + y * 1.8760108 + z * 0.041556),
+    b: linearToSrgb(x * 0.0556434 + y * -0.2040259 + z * 1.0572252)
+  };
+}
+function hexToLab(hex) {
+  const rgb = hexToRgb(hex);
+  const xyz = rgbToXyz(rgb);
+  return xyzToLab(xyz.x, xyz.y, xyz.z);
+}
+function labToHex(lab) {
+  const xyz = labToXyz(lab);
+  const rgb = xyzToRgb(xyz.x, xyz.y, xyz.z);
+  return rgbToHex(rgb);
+}
+function chroma(lab) {
+  return Math.hypot(lab.a, lab.b);
+}
+
+// src/vendor/prusa-fdm-mixer/yule-nielsen.ts
+function yuleNielsenMix(parts, n = 3) {
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  for (const p of parts) {
+    const rgb = hexToRgb(p.hex);
+    r += Math.pow(srgbToLinear(rgb.r), 1 / n) * p.ratio;
+    g += Math.pow(srgbToLinear(rgb.g), 1 / n) * p.ratio;
+    b += Math.pow(srgbToLinear(rgb.b), 1 / n) * p.ratio;
+  }
+  return {
+    r: linearToSrgb(Math.pow(Math.max(0, r), n)),
+    g: linearToSrgb(Math.pow(Math.max(0, g), n)),
+    b: linearToSrgb(Math.pow(Math.max(0, b), n))
+  };
+}
+
+// src/vendor/prusa-fdm-mixer/prusa-fdm-mixer.ts
+var DEFAULT_V7_PARAMS = {
+  YN_N: 3,
+  L_BASE_SLOPE: -0.0477,
+  L_BASE_INTERCEPT: -2.112,
+  L_KNEE: 15,
+  L_KNEE_SLOPE: -0.06,
+  C_SLOPE: 0.278,
+  C_INTERCEPT: -15.58,
+  HUE_CENTER: 210,
+  HUE_FALLOFF: 30,
+  HUE_PEAK: 10.38,
+  PEAK_STRENGTH: 1.375
+};
+function mixFilaments(parts) {
+  return mixFilamentsWithParams(parts, DEFAULT_V7_PARAMS);
+}
+function mixFilamentsWithParams(parts, params) {
+  if (parts.length === 0) {
+    throw new Error("mixFilaments: parts must not be empty");
+  }
+  const total = parts.reduce((s, p) => s + p.ratio, 0);
+  if (total <= 0) {
+    throw new Error("mixFilaments: ratios must sum to a positive value");
+  }
+  const normalized = parts.map((p) => {
+    if (p.ratio < 0) {
+      throw new Error(`mixFilaments: negative ratio for ${p.hex}`);
+    }
+    return { hex: p.hex, ratio: p.ratio / total };
+  });
+  for (const p of normalized) {
+    if (p.ratio >= 0.9999) {
+      const lab2 = hexToLab(p.hex);
+      const rgb2 = hexToRgb(p.hex);
+      return { hex: rgbToHex(rgb2), lab: lab2, rgb: rgb2 };
+    }
+  }
+  const baseRgb = yuleNielsenMix(normalized, params.YN_N);
+  const baseLab = hexToLab(rgbToHex(baseRgb));
+  const Ls = normalized.map((p) => hexToLab(p.hex).L);
+  const lGap = Math.max(...Ls) - Math.min(...Ls);
+  const N = normalized.length;
+  const ratioProduct = normalized.reduce((s, p) => s * p.ratio, 1);
+  const wRaw = Math.pow(N, N) * ratioProduct;
+  const w = Math.max(0, Math.min(1, wRaw)) * params.PEAK_STRENGTH;
+  let dL = params.L_BASE_SLOPE * lGap + params.L_BASE_INTERCEPT;
+  if (lGap > params.L_KNEE) {
+    dL += params.L_KNEE_SLOPE * (lGap - params.L_KNEE);
+  }
+  const newL = baseLab.L + dL * w;
+  const baseC = chroma(baseLab);
+  let aOut = baseLab.a;
+  let bOut = baseLab.b;
+  if (baseC >= 0.01) {
+    const targetDC = (params.C_SLOPE * newL + params.C_INTERCEPT) * w;
+    const newC2 = Math.max(0, baseC + targetDC);
+    const scale = newC2 / baseC;
+    aOut = baseLab.a * scale;
+    bOut = baseLab.b * scale;
+  }
+  const newC = Math.hypot(aOut, bOut);
+  if (newC >= 1) {
+    const predHue = (Math.atan2(bOut, aOut) * 180 / Math.PI + 360) % 360;
+    const distFromCenter = Math.abs(predHue - params.HUE_CENTER);
+    const inBand = distFromCenter < params.HUE_FALLOFF;
+    if (inBand) {
+      const hCorr = params.HUE_PEAK * (1 - distFromCenter / params.HUE_FALLOFF) * w;
+      const newHueRad = (predHue + hCorr) % 360 * Math.PI / 180;
+      aOut = newC * Math.cos(newHueRad);
+      bOut = newC * Math.sin(newHueRad);
+    }
+  }
+  const lab = { L: newL, a: aOut, b: bOut };
+  const hex = labToHex(lab);
+  const rgb = hexToRgb(hex);
+  return { hex, lab, rgb };
+}
+
+// src/vendor/prusa-fdm-mixer/delta-e.ts
+function deltaE2000(lab1, lab2) {
+  const { L: L1, a: a1, b: b1 } = lab1;
+  const { L: L2, a: a2, b: b2 } = lab2;
+  const avgL = (L1 + L2) / 2;
+  const C1 = Math.hypot(a1, b1);
+  const C2 = Math.hypot(a2, b2);
+  const avgC = (C1 + C2) / 2;
+  const G = 0.5 * (1 - Math.sqrt(Math.pow(avgC, 7) / (Math.pow(avgC, 7) + Math.pow(25, 7))));
+  const a1p = (1 + G) * a1;
+  const a2p = (1 + G) * a2;
+  const C1p = Math.hypot(a1p, b1);
+  const C2p = Math.hypot(a2p, b2);
+  const avgCp = (C1p + C2p) / 2;
+  const h1p = (Math.atan2(b1, a1p) * 180 / Math.PI + 360) % 360;
+  const h2p = (Math.atan2(b2, a2p) * 180 / Math.PI + 360) % 360;
+  let avgHp;
+  if (Math.abs(h1p - h2p) > 180) avgHp = (h1p + h2p + 360) / 2;
+  else avgHp = (h1p + h2p) / 2;
+  const T = 1 - 0.17 * Math.cos((avgHp - 30) * Math.PI / 180) + 0.24 * Math.cos(2 * avgHp * Math.PI / 180) + 0.32 * Math.cos((3 * avgHp + 6) * Math.PI / 180) - 0.2 * Math.cos((4 * avgHp - 63) * Math.PI / 180);
+  let dhp = h2p - h1p;
+  if (Math.abs(dhp) > 180) dhp -= dhp > 0 ? 360 : -360;
+  const dLp = L2 - L1;
+  const dCp = C2p - C1p;
+  const dHp = 2 * Math.sqrt(C1p * C2p) * Math.sin(dhp / 2 * Math.PI / 180);
+  const SL = 1 + 0.015 * Math.pow(avgL - 50, 2) / Math.sqrt(20 + Math.pow(avgL - 50, 2));
+  const SC = 1 + 0.045 * avgCp;
+  const SH = 1 + 0.015 * avgCp * T;
+  const dTheta = 30 * Math.exp(-Math.pow((avgHp - 275) / 25, 2));
+  const RC = 2 * Math.sqrt(Math.pow(avgCp, 7) / (Math.pow(avgCp, 7) + Math.pow(25, 7)));
+  const RT = -RC * Math.sin(2 * dTheta * Math.PI / 180);
+  return Math.sqrt(
+    Math.pow(dLp / SL, 2) + Math.pow(dCp / SC, 2) + Math.pow(dHp / SH, 2) + RT * (dCp / SC) * (dHp / SH)
+  );
+}
+
+// src/virtual-extruders.ts
+var VIRTUAL_EXTRUDER_PALETTE = Object.freeze([
+  Object.freeze({ name: "Cyan", color: "#00FFFF" }),
+  Object.freeze({ name: "Magenta", color: "#FF00FF" }),
+  Object.freeze({ name: "Yellow", color: "#FFFF00" }),
+  Object.freeze({ name: "White", color: "#FFFFFF" }),
+  Object.freeze({ name: "Black", color: "#000000" }),
+  Object.freeze({ name: "Red", color: "#FF0000" }),
+  Object.freeze({ name: "Green", color: "#00FF00" }),
+  Object.freeze({ name: "Blue", color: "#0000FF" })
+]);
+var validColor = (color) => typeof color === "string" && /^#[\da-f]{6}$/i.test(color);
+var copyComponents = (parts) => parts.map((p) => ({ ...p }));
+function recipe(parts, count) {
+  if (!Array.isArray(parts) || parts.length < 1 || parts.length > 3 || parts.some(
+    (p) => !p || !Number.isInteger(p.extruder) || p.extruder < 1 || p.extruder > count || !Number.isFinite(p.ratio) || p.ratio < 0
+  ))
+    throw new Error(
+      "Virtual recipes require 1\u20133 components with available physical tools and finite, nonnegative ratios."
+    );
+  const active = /* @__PURE__ */ new Map();
+  for (const p of parts)
+    if (p.ratio > 0)
+      active.set(p.extruder, (active.get(p.extruder) || 0) + p.ratio);
+  const total = [...active.values()].reduce((a, b) => a + b, 0);
+  if (!(total > 0) || !Number.isFinite(total))
+    throw new Error("Virtual recipe ratios must have a finite positive sum.");
+  const normalized = [...active].map(([extruder, ratio]) => ({
+    extruder,
+    ratio: ratio / total
+  }));
+  return normalized.length === 1 ? [
+    { extruder: normalized[0].extruder, ratio: 0.5 },
+    { extruder: normalized[0].extruder, ratio: 0.5 }
+  ] : normalized;
+}
+function planVirtualExtruders(document, options, limits = {}) {
+  if (!options || typeof options !== "object" || !Number.isInteger(options.physicalExtruderCount) || options.physicalExtruderCount < 2 || options.physicalExtruderCount > 8)
+    throw new Error(
+      "Virtual extruder export requires physicalExtruderCount from 2 through 8. A single physical tool cannot mix colors."
+    );
+  const count = options.physicalExtruderCount;
+  const colors = options.physicalColors === void 0 ? VIRTUAL_EXTRUDER_PALETTE.slice(0, count).map((p) => p.color) : options.physicalColors;
+  if (!Array.isArray(colors) || colors.length !== count || colors.some((c) => !validColor(c)))
+    throw new Error(
+      "physicalColors must contain one #RRGGBB color per physical extruder."
+    );
+  if (!Array.isArray(document.palette) || document.palette.length > 255 || document.palette.some((c) => !validColor(c)))
+    throw new Error("Invalid region display palette.");
+  const regions = /* @__PURE__ */ new Set();
+  const add = (region) => {
+    if (!Number.isInteger(region) || region < 1 || region > 255)
+      throw new Error(
+        "Invalid source color region for virtual extruder export."
+      );
+    regions.add(region);
+  };
+  const collect = (tree) => {
+    if ("region" in tree) {
+      if (tree.region) add(tree.region);
+    } else tree.children.forEach(collect);
+  };
+  const budgets = processingLimits(limits), budget = { nodes: 0 };
+  for (const object of document.objects) {
+    add(object.defaultRegion ?? 1);
+    for (const part of object.parts) {
+      add(part.defaultRegion ?? object.defaultRegion ?? 1);
+      for (const tree of part.paint) {
+        paintStats(tree, budgets, budget);
+        collect(tree);
+      }
+    }
+  }
+  if (regions.size > 255 - count)
+    throw new Error(
+      `Virtual extruder export supports at most ${255 - count} used regions with ${count} physical tools (255 material IDs total).`
+    );
+  const overrides = /* @__PURE__ */ new Map();
+  if (options.recipes !== void 0) {
+    if (!Array.isArray(options.recipes))
+      throw new Error("recipes must be an array of region recipes.");
+    for (const item of options.recipes) {
+      if (!item || !regions.has(item.region) || overrides.has(item.region))
+        throw new Error(
+          "Recipe overrides must reference distinct used source regions."
+        );
+      overrides.set(item.region, recipe(item.components, count));
+    }
+  }
+  const physicalExtruders = colors.map((color, i) => ({
+    id: i + 1,
+    name: options.physicalColors ? `Tool ${i + 1}` : VIRTUAL_EXTRUDER_PALETTE[i].name,
+    color: color.toUpperCase()
+  }));
+  const predict = (components) => mixFilaments(
+    components.map((p) => ({
+      hex: colors[p.extruder - 1],
+      ratio: p.ratio
+    }))
+  );
+  const candidates = [];
+  const candidate = (parts) => {
+    const prediction = predict(parts);
+    candidates.push({ components: recipe(parts, count), prediction });
+  };
+  for (let i = 1; i <= count; i++) candidate([{ extruder: i, ratio: 1 }]);
+  for (let i = 1; i <= count; i++)
+    for (let j = i + 1; j <= count; j++) {
+      for (const ratio of [0.25, 0.5, 0.75])
+        candidate([
+          { extruder: i, ratio },
+          { extruder: j, ratio: 1 - ratio }
+        ]);
+      for (let k = j + 1; k <= count; k++)
+        candidate([
+          { extruder: i, ratio: 1 / 3 },
+          { extruder: j, ratio: 1 / 3 },
+          { extruder: k, ratio: 1 / 3 }
+        ]);
+    }
+  const warnings = [
+    "Open this ColorMix 3MF with File \u2192 Open Project in PrusaSlicer 2.9.6 or later. Importing geometry alone discards virtual extruders.",
+    `Recipes reference ${count} physical tools. Select a printer with those slots before opening the project and load the intended filaments in the same order; display swatches do not automatically recalculate recipes.`
+  ];
+  if (!options.physicalColors)
+    warnings.push(
+      "Starting recipes assume reference CMYWKRGB swatches, truncated to the physical tool count. These are not measured filament colors; edit the recipes in PrusaSlicer or supply physicalColors for better predictions."
+    );
+  return {
+    physicalExtruders,
+    regions: [...regions].sort((a, b) => a - b).map((region, i) => {
+      const color = (document.palette[region - 1] ?? DEFAULT_COLORS[(region - 1) % DEFAULT_COLORS.length]).toUpperCase();
+      const desired = hexToLab(color);
+      let selected = candidates[0], difference = Infinity;
+      const explicit = overrides.get(region);
+      const choices = explicit ? [
+        {
+          components: explicit,
+          prediction: predict(
+            explicit.length === 2 && explicit[0].extruder === explicit[1].extruder ? [{ extruder: explicit[0].extruder, ratio: 1 }] : explicit
+          )
+        }
+      ] : candidates;
+      for (const item of choices) {
+        const distance = deltaE2000(desired, item.prediction.lab);
+        if (distance < difference - 1e-9) {
+          selected = item;
+          difference = distance;
+        }
+      }
+      return {
+        region,
+        virtualExtruder: count + i + 1,
+        color,
+        predictedColor: selected.prediction.hex.toUpperCase(),
+        components: copyComponents(selected.components),
+        colorDifference: difference
+      };
+    }),
+    warnings
+  };
+}
+function virtualizeDocument(document, plan) {
+  const ids = new Map(plan.regions.map((r) => [r.region, r.virtualExtruder]));
+  const mapped = (region) => {
+    const id = ids.get(region);
+    if (id === void 0)
+      throw new Error("Missing virtual extruder for a source region.");
+    return id;
+  };
+  const paint = (tree) => "region" in tree ? { region: tree.region ? mapped(tree.region) : 0 } : { ...tree, children: tree.children.map(paint) };
+  return {
+    ...document,
+    palette: [
+      ...plan.physicalExtruders.map((p) => p.color),
+      ...plan.regions.map((p) => p.color)
+    ],
+    objects: document.objects.map((object) => ({
+      ...object,
+      defaultRegion: mapped(object.defaultRegion ?? 1),
+      parts: object.parts.map((part) => ({
+        ...part,
+        defaultRegion: mapped(part.defaultRegion ?? object.defaultRegion ?? 1),
+        paint: part.paint.map(paint)
+      }))
+    }))
+  };
+}
+function attachVirtualExtruders(files, plan) {
+  files[FULL_SPECTRUM_PATH] = strToU8(
+    JSON.stringify({
+      version: 1,
+      physical_extruders: plan.physicalExtruders.map(({ id, color }) => ({
+        id,
+        color
+      })),
+      virtual_extruders: plan.regions.map((r) => ({
+        id: r.virtualExtruder,
+        kind: "fullspectrum",
+        color: r.color,
+        components: r.components
+      }))
+    })
+  );
+}
+
 // src/document.ts
 var identity = () => new Matrix44().toArray();
 var sources = /* @__PURE__ */ new WeakMap();
@@ -1455,6 +1929,34 @@ function writeDocument(document, options) {
   const limits = processingLimits(
     options.limits || sources.get(document)?.limits
   );
+  if (options.virtualExtruders !== void 0) {
+    if (!getTarget(target).supportsVirtualExtruders)
+      throw new Error(
+        `Virtual extruder export is not supported for ${getTarget(target).name}. Choose the dedicated PrusaSlicer 2.x target (prusa), requiring PrusaSlicer 2.9.6 or later.`
+      );
+    if (options.mode !== "create")
+      throw new Error(
+        "Enabling or regenerating virtual extruders requires create export. Omit virtualExtruders in update mode to preserve an existing project."
+      );
+    validateDocument(document, target, limits);
+    const plan = planVirtualExtruders(
+      document,
+      options.virtualExtruders,
+      limits
+    );
+    const mapped = virtualizeDocument(document, plan);
+    const files = createFiles(mapped, "prusa", limits, {
+      application: "PrusaSlicer-2.9.6"
+    });
+    attachVirtualExtruders(files, plan);
+    return {
+      bytes: zipSync(files, { level: 6 }),
+      changes: compareDocument(document),
+      warnings: [...plan.warnings],
+      droppedPaths: [],
+      virtualExtruders: plan
+    };
+  }
   validateDocument(document, target, limits);
   const changes = compareDocument(document);
   if (options.mode === "update") {
@@ -1658,6 +2160,8 @@ export {
   paintTargets,
   noticesForMode,
   SLICER_NAMES,
+  VIRTUAL_EXTRUDER_PALETTE,
+  planVirtualExtruders,
   identity,
   readDocument,
   editDocument,
