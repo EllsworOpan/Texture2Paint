@@ -2930,17 +2930,21 @@ function setVertexColorPaletteShader(material, palette, enabled) {
     color.setRGB(sample[0] / 255, sample[1] / 255, sample[2] / 255, THREE.SRGBColorSpace);
     return color;
   });
+  original.colorCount = colors.length;
+  // WebGL uploads all 32 entries declared in the shader, even when the
+  // active palette is smaller. Keep unused entries outside the search loop.
+  while (colors.length < 32) colors.push(new THREE.Color(0, 0, 0));
   original.colors = colors;
   if (original.shader) {
     original.shader.uniforms.texture2PaintPalette.value = colors;
-    original.shader.uniforms.texture2PaintPaletteCount.value = colors.length;
+    original.shader.uniforms.texture2PaintPaletteCount.value = original.colorCount;
   }
   if (material._vertexQuantizationEnabled) return;
   material.onBeforeCompile = shader => {
     original.onBeforeCompile?.call(material, shader);
     original.shader = shader;
     shader.uniforms.texture2PaintPalette = { value: original.colors };
-    shader.uniforms.texture2PaintPaletteCount = { value: original.colors.length };
+    shader.uniforms.texture2PaintPaletteCount = { value: original.colorCount };
     shader.fragmentShader = `
 uniform vec3 texture2PaintPalette[32];
 uniform int texture2PaintPaletteCount;
@@ -4651,7 +4655,11 @@ export async function exportMultiColor3MF(
   paintResolutionMm = 0,
   paintOptions = {}
 ) {
-  const target = getTarget(paintOptions?.format || 'universal');
+  const virtualExtruders = paintOptions?.virtualExtruders;
+  const target = getTarget(paintOptions?.format || (virtualExtruders !== undefined ? 'prusa' : 'universal'));
+  if (virtualExtruders !== undefined && !target.supportsVirtualExtruders) {
+    throw new Error(`Virtual extruder export is not supported for ${target.name}. Choose PrusaSlicer 2.x (2.9.6 or later).`);
+  }
   const refinePaintBoundaries = paintOptions?.refineBoundaries !== false;
   const overridePaintBudget = refinePaintBoundaries && paintOptions?.overrideBudget === true;
   const requestedAutomaticBudget = Number(paintOptions?.automaticTriangleBudget);
@@ -5398,7 +5406,12 @@ export async function exportMultiColor3MF(
   const name = 'Watertight_Multicolor_Model';
   const mesh = {vertices:weldedVertices.flatMap(v=>v.map(n=>Number(n.toFixed(exportCoordinateDecimals)))),triangles:emittedTriangles};
   const modelDocument = createDocument([{id:'model',name,printable:true,transform:identity(),overrides:{},parts:[{id:'model/paint',name,kind:'ModelPart',mesh,paint:regionPaint,transform:identity(),overrides:{}}]}],palette.map(toHex));
-  return writeDocument(modelDocument,{mode:'create',target:target.id,limits:overridePaintBudget?{maxSourceTriangles:Infinity,maxPaintNodes:Infinity}:undefined}).bytes.buffer;
+  return writeDocument(modelDocument, {
+    mode: 'create',
+    target: target.id,
+    limits: overridePaintBudget ? { maxSourceTriangles: Infinity, maxPaintNodes: Infinity } : undefined,
+    virtualExtruders,
+  }).bytes.buffer;
 }
 
 function textureHasTransparentPixels(texture) {

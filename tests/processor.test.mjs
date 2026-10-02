@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { strFromU8, unzipSync } from 'fflate';
+import { readDocument } from '../src/vendor/three-mf/index.js';
 import {
   applyLiveColorQuantization,
   applyLiveColorQuantizationAsync,
@@ -345,6 +346,9 @@ test('live quantization keeps vertex-color base factors and installs palette pre
   };
   material.onBeforeCompile(shader);
   assert.match(shader.fragmentShader, /texture2PaintPalette/);
+  assert.equal(shader.uniforms.texture2PaintPalette.value.length, 32);
+  assert.equal(shader.uniforms.texture2PaintPaletteCount.value, 2);
+  assert.ok(shader.uniforms.texture2PaintPalette.value.every(color => color.isColor));
 
   const installedShaderHook = material.onBeforeCompile;
   const materialVersion = material.version;
@@ -352,6 +356,13 @@ test('live quantization keeps vertex-color base factors and installs palette pre
   assert.equal(material.onBeforeCompile, installedShaderHook);
   assert.equal(material.version, materialVersion);
   assert.equal(shader.uniforms.texture2PaintPalette.value[0].getHex(), 0x00ff00);
+  assert.equal(shader.uniforms.texture2PaintPalette.value.length, 32);
+  assert.equal(shader.uniforms.texture2PaintPaletteCount.value, 2);
+
+  applyLiveColorQuantization(root, 3, true, [[0, 255, 0], [255, 255, 0], [255, 0, 255]]);
+  assert.equal(shader.uniforms.texture2PaintPalette.value.length, 32);
+  assert.equal(shader.uniforms.texture2PaintPaletteCount.value, 3);
+  assert.equal(shader.uniforms.texture2PaintPalette.value[2].getHex(), 0xff00ff);
 
   applyLiveColorQuantization(root, 2, false, [[255, 0, 0], [0, 0, 255]]);
   assert.equal(material._vertexQuantizationEnabled, false);
@@ -1133,6 +1144,79 @@ test('Orca target rejects used higher slots and accepts a large palette with onl
   root.children[0].material._quantizedLabels[0] = 15;
   assert.match(await exportedModelXml(root, 0, 10, { format: 'orca' }), /paint_color="DC"/);
   await assert.rejects(() => exportedModelXml(root, 0, 10, { format: 'unknown' }), /target/);
+});
+
+test('virtual 3MF export writes physical colors, recipes, and matching virtual paint IDs', async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([0, 1, 0, 1]), 2, 2);
+  const physicalColors = ['#102030', '#F0E0D0'];
+  const options = {
+    physicalExtruderCount: 2,
+    physicalColors,
+    recipes: [{ region: 2, components: [{ extruder: 1, ratio: 1 }, { extruder: 2, ratio: 3 }] }],
+  };
+  const exportBytes = async paintOptions => new Uint8Array(await exportMultiColor3MF(
+    root, 2, true, 10, false, root._quantizedPalette, 0, 0, 0, paintOptions
+  ));
+  const ordinary = await exportBytes({ format: 'prusa' });
+  const bytes = await exportBytes({ format: 'prusa', virtualExtruders: options });
+  const files = unzipSync(bytes);
+  const metadata = JSON.parse(strFromU8(files['Metadata/Prusa_Slicer_full_spectrum.json']));
+  assert.equal(metadata.version, 1);
+  assert.deepEqual(metadata.physical_extruders, physicalColors.map((color, index) => ({ id: index + 1, color })));
+  assert.deepEqual(metadata.virtual_extruders.map(({ id, kind, color }) => ({ id, kind, color })), [
+    { id: 3, kind: 'fullspectrum', color: '#000000' },
+    { id: 4, kind: 'fullspectrum', color: '#FFFFFF' },
+  ]);
+  assert.deepEqual(metadata.virtual_extruders[1].components, [
+    { extruder: 1, ratio: 0.25 }, { extruder: 2, ratio: 0.75 },
+  ]);
+  for (const virtual of metadata.virtual_extruders) {
+    assert.ok(virtual.components.every(component => component.extruder >= 1 && component.extruder <= 2));
+    assert.ok(Math.abs(virtual.components.reduce((sum, component) => sum + component.ratio, 0) - 1) < 1e-9);
+  }
+  const document = readDocument(bytes);
+  const part = document.objects[0].parts[0];
+  const originalPart = readDocument(ordinary).objects[0].parts[0];
+  assert.deepEqual(part.mesh, originalPart.mesh);
+  assert.deepEqual(part.paint, originalPart.paint.map(({ region }) => ({ region: region + 2 })));
+  assert.deepEqual(document.palette, [...physicalColors, '#000000', '#FFFFFF']);
+  assert.doesNotMatch(Object.values(files).map(strFromU8).join('\n'), /nozzle_diameter|printer_settings|filament_diameter|print_settings/);
+  assert.equal(unzipSync(ordinary)['Metadata/Prusa_Slicer_full_spectrum.json'], undefined);
+  assert.deepEqual(root._quantizedPalette, [[0, 0, 0], [255, 255, 255]]);
+});
+
+test('virtual 3MF export defaults to Prusa and supports 2 through 8 physical slots', async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([0, 1]), 2, 1);
+  for (const count of [2, 5, 8]) {
+    const archive = await exportMultiColor3MF(root, 2, true, 10, false, root._quantizedPalette, 0, 0, 0, {
+      virtualExtruders: { physicalExtruderCount: count },
+      refineBoundaries: false,
+    });
+    const files = unzipSync(new Uint8Array(archive));
+    const metadata = JSON.parse(strFromU8(files['Metadata/Prusa_Slicer_full_spectrum.json']));
+    assert.equal(metadata.physical_extruders.length, count);
+    assert.equal(metadata.virtual_extruders.length, 2);
+    assert.deepEqual(metadata.virtual_extruders.map(virtual => virtual.id), [count + 1, count + 2]);
+  }
+});
+
+test('virtual 3MF export rejects unsupported slicers and invalid physical slots or colors', async () => {
+  const root = createQuantizedSquareRoot(new Uint8Array([0]), 1, 1);
+  for (const format of ['universal', 'prusa2-bambu', 'prusa3', 'bambu', 'orca']) {
+    await assert.rejects(() => exportedModelXml(root, 0, 10, {
+      format, virtualExtruders: { physicalExtruderCount: 5 },
+    }), /Virtual extruder export is not supported/);
+  }
+  for (const physicalExtruderCount of [1, 9, 2.5, NaN]) {
+    await assert.rejects(() => exportedModelXml(root, 0, 10, {
+      virtualExtruders: { physicalExtruderCount },
+    }), /physicalExtruderCount from 2 through 8/);
+  }
+  for (const physicalColors of [['#123456'], ['invalid', '#FFFFFF']]) {
+    await assert.rejects(() => exportedModelXml(root, 0, 10, {
+      virtualExtruders: { physicalExtruderCount: 2, physicalColors },
+    }), /one #RRGGBB color per physical extruder/);
+  }
 });
 
 test('Prusa 3 export carries native paint and volume identity without printer profiles', async () => {

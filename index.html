@@ -911,6 +911,68 @@
       color: var(--err);
     }
 
+    .physical-slot-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .physical-slot-count {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      flex: 0 0 38px;
+    }
+
+    .physical-slot-count .proc-num-input {
+      width: 38px;
+      height: 26px;
+    }
+
+    .physical-color-list {
+      display: flex;
+      flex: 1;
+      min-width: 0;
+      gap: 3px;
+    }
+
+    .physical-color-control {
+      display: flex;
+      flex: 1;
+      min-width: 0;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      font-size: 9px;
+      color: var(--text-dim);
+    }
+
+    .physical-color-control input {
+      width: 100%;
+      max-width: 23px;
+      height: 23px;
+      padding: 1px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--surface);
+      cursor: pointer;
+    }
+
+    .physical-color-control input::-webkit-color-swatch-wrapper {
+      padding: 0;
+    }
+
+    .physical-color-control input::-webkit-color-swatch {
+      border: 0;
+      border-radius: 2px;
+    }
+
+    .physical-color-control input::-moz-color-swatch {
+      border: 0;
+      border-radius: 2px;
+    }
+
     .proc-section[hidden] {
       display: none;
     }
@@ -1827,6 +1889,28 @@
             </select>
             <svg class="select-arrow" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z" /></svg>
           </div>
+          <div class="toggle-row" style="margin-bottom: 8px;">
+            <span class="proc-label-with-help">
+              <label for="proc-virtual-extruders" class="toggle-text">Use Virtual Extruders</label>
+              <button class="proc-help" type="button" aria-label="About virtual extruders" aria-expanded="false"
+                aria-describedby="proc-tooltip" data-help="Export model colors as virtual extruders with automatic mixing recipes. Set the physical slot count to match your printer (2–8, default 8). The numbered swatches start with reference CMYWKRGB colors; click a square to customize a filament color. Match your loaded filaments to the slot order. Recipes are estimates you can edit in the slicer; the preview shows desired model colors. Select the matching printer in PrusaSlicer 2.9.6 or later, then use File → Open Project to retain virtual extruders. Turn this off to export ordinary physical-slot paint.">i</button>
+            </span>
+            <label class="switch" for="proc-virtual-extruders">
+              <input type="checkbox" id="proc-virtual-extruders" aria-controls="proc-virtual-settings">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div id="proc-virtual-settings" hidden>
+            <div class="physical-slot-row">
+              <div class="physical-slot-count">
+                <label for="proc-physical-extruders" class="proc-tag">Slots</label>
+                <input type="number" id="proc-physical-extruders" class="proc-num-input" min="2" max="8" step="1"
+                  value="8" aria-label="Physical Filament Slots" aria-describedby="proc-virtual-note">
+              </div>
+              <div id="proc-physical-colors" class="physical-color-list" role="group" aria-label="Physical filament colors in slot order"></div>
+            </div>
+            <p class="paint-budget-message" id="proc-virtual-note">PrusaSlicer 2.9.6+ · File → Open Project</p>
+          </div>
           <div class="proc-label-row" style="margin-top: 4px;">
             <label for="proc-size-num" class="proc-tag">Target Print Size</label>
             <span style="font-size: 10px; color: var(--text-faint);">Max Dimension</span>
@@ -1992,8 +2076,7 @@
 
   <script type="module">
     import * as THREE from 'three';
-    import { paintTargets } from './src/vendor/three-mf/index.js';
-    document.getElementById('proc-3mf-target').replaceChildren(...paintTargets().map(t=>new Option(t.name,t.id)));
+    import { paintTargets, VIRTUAL_EXTRUDER_PALETTE } from './src/vendor/three-mf/index.js';
     import { meshyToGlb, isMeshyFile, isGlbFile } from './src/decrypt.js';
     import { decompressGlb } from './src/decompress.js';
     import { Viewer, disposeModelResources } from './src/viewer.js';
@@ -2066,6 +2149,11 @@
     const $simplifyLevel = $('proc-simplify-level');
     const $simplifyBadge = $('simplify-badge');
     const $refineBoundariesToggle = $('proc-refine-boundaries');
+    const $threeMfTarget = $('proc-3mf-target');
+    const $virtualExtrudersToggle = $('proc-virtual-extruders');
+    const $virtualSettings = $('proc-virtual-settings');
+    const $physicalExtruders = $('proc-physical-extruders');
+    const $physicalColors = $('proc-physical-colors');
     const $paintModeBadge = $('paint-mode-badge');
     const $paintBudgetStatus = $('paint-budget-status');
     const $paintBudgetSource = $('paint-budget-source');
@@ -2263,6 +2351,70 @@
       });
       if (refreshPreview) schedulePaintPreview();
     }
+
+    // Keep the physical target and all eight swatches when switching modes or
+    // reducing the slot count, so edits are restored when those slots return.
+    let physicalPaintTarget = paintTargets()[0].id;
+    const physicalFilamentColors = VIRTUAL_EXTRUDER_PALETTE.map(swatch => swatch.color);
+
+    function getPhysicalExtruderCount() {
+      const requested = Number($physicalExtruders.value);
+      return $physicalExtruders.value === '' || !Number.isFinite(requested)
+        ? 8 : Math.max(2, Math.min(8, Math.round(requested)));
+    }
+
+    function renderPhysicalFilamentColors() {
+      const count = getPhysicalExtruderCount();
+      $physicalColors.replaceChildren(...physicalFilamentColors.slice(0, count).map((color, index) => {
+        const label = document.createElement('label');
+        label.className = 'physical-color-control';
+        const name = document.createElement('span');
+        name.textContent = String(index + 1);
+        name.setAttribute('aria-hidden', 'true');
+        const input = document.createElement('input');
+        input.type = 'color';
+        input.id = `proc-physical-color-${index + 1}`;
+        input.value = color;
+        input.disabled = !$virtualExtrudersToggle.checked;
+        input.setAttribute('aria-label', `Physical filament color for slot ${index + 1}`);
+        input.title = `Slot ${index + 1}: ${color.toUpperCase()} · Click to edit`;
+        input.addEventListener('input', () => {
+          physicalFilamentColors[index] = input.value.toUpperCase();
+          input.title = `Slot ${index + 1}: ${physicalFilamentColors[index]} · Click to edit`;
+        });
+        label.append(input, name);
+        return label;
+      }));
+    }
+
+    function syncVirtualExtruderUI() {
+      const enabled = $virtualExtrudersToggle.checked;
+      const targets = paintTargets({ virtualExtruders: enabled });
+      const preferred = enabled ? $threeMfTarget.value : physicalPaintTarget;
+      $threeMfTarget.replaceChildren(...targets.map(target => new Option(target.name, target.id)));
+      $threeMfTarget.value = targets.some(target => target.id === preferred) ? preferred : targets[0].id;
+      $virtualSettings.hidden = !enabled;
+      $physicalExtruders.disabled = !enabled;
+      renderPhysicalFilamentColors();
+    }
+
+    $threeMfTarget.addEventListener('change', () => {
+      if (!$virtualExtrudersToggle.checked) physicalPaintTarget = $threeMfTarget.value;
+    });
+    $virtualExtrudersToggle.addEventListener('change', syncVirtualExtruderUI);
+    $physicalExtruders.addEventListener('input', () => {
+      if ($physicalExtruders.value !== '') $physicalExtruders.value = getPhysicalExtruderCount();
+      renderPhysicalFilamentColors();
+    });
+    function normalizePhysicalExtruderCount() {
+      const count = String(getPhysicalExtruderCount());
+      if ($physicalExtruders.value === count) return;
+      $physicalExtruders.value = count;
+      renderPhysicalFilamentColors();
+    }
+    $physicalExtruders.addEventListener('change', normalizePhysicalExtruderCount);
+    $physicalExtruders.addEventListener('blur', normalizePhysicalExtruderCount);
+    syncVirtualExtruderUI();
 
     function schedulePaintPreview() {
       clearTimeout(paintPreviewTimer);
@@ -3119,7 +3271,11 @@
           smoothLevel,
           paintResolutionMm,
           {
-            format: $('proc-3mf-target').value,
+            format: $threeMfTarget.value,
+            virtualExtruders: $virtualExtrudersToggle.checked ? {
+              physicalExtruderCount: getPhysicalExtruderCount(),
+              physicalColors: physicalFilamentColors.slice(0, getPhysicalExtruderCount()),
+            } : undefined,
             refineBoundaries: $refineBoundariesToggle.checked,
             overrideBudget: paintModePreference === 'override',
           }
