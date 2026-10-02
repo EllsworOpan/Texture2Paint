@@ -13,8 +13,10 @@ import {
   detectThreeMfDialect
 } from "./chunk-W7EBKI6N.js";
 import {
-  readPrusaPaint
-} from "./chunk-DHSJONSU.js";
+  FULL_SPECTRUM_PATH,
+  readPrusaPaint,
+  readPrusaVirtualPalette
+} from "./chunk-WQ5OOP4H.js";
 import {
   export3mf
 } from "./chunk-2SPQVFJA.js";
@@ -145,43 +147,6 @@ var Archive = class {
 // src/reader.js
 var import_xmldom = __toESM(require_lib(), 1);
 import { Matrix4, Vector3 } from "three";
-
-// src/prusa-virtual.js
-var FULL_SPECTRUM_PATH = "Metadata/Prusa_Slicer_full_spectrum.json";
-function readPrusaVirtualPalette(read, palette, fallbackColors) {
-  const text = read(FULL_SPECTRUM_PATH);
-  if (text === null) return [];
-  try {
-    const data = JSON.parse(text);
-    if (data.version !== 1 || !Array.isArray(data.virtual_extruders))
-      throw new Error("Unknown ColorMix metadata.");
-    const colors = /* @__PURE__ */ new Map(), seen = /* @__PURE__ */ new Set();
-    for (const entry of [
-      ...Array.isArray(data.physical_extruders) ? data.physical_extruders : [],
-      ...data.virtual_extruders
-    ]) {
-      if (!entry || !Number.isInteger(entry.id) || entry.id < 1 || entry.id > 255 || seen.has(entry.id))
-        throw new Error("Invalid ColorMix slot.");
-      seen.add(entry.id);
-      if (typeof entry.color === "string" && /^#[\da-f]{6}$/i.test(entry.color))
-        colors.set(entry.id, entry.color);
-    }
-    for (const [id, color] of colors) {
-      while (palette.length < id)
-        palette.push(fallbackColors[palette.length % fallbackColors.length]);
-      palette[id - 1] = color;
-    }
-    return data.virtual_extruders.length ? [
-      "Virtual extruders were retained as separate color regions. Update export preserves their source recipes; create export needs virtualExtruders to regenerate recipes."
-    ] : [];
-  } catch {
-    return [
-      "Unreadable ColorMix display metadata was ignored. Region numbers are retained; verify colors and recipes before printing."
-    ];
-  }
-}
-
-// src/reader.js
 var DEFAULT_COLORS = [
   "#70C6B4",
   "#F2AD60",
@@ -277,7 +242,7 @@ function readDocumentData(buffer, filename = "Model.3mf", progress = (_message) 
       "No 3D model was found: the archive is missing its model resource."
     );
   const cache = /* @__PURE__ */ new Map(), colorRegions = /* @__PURE__ */ new Map(), warnings = [], palette = [];
-  const prusa3 = readPrusaPaint(read);
+  const prusa3 = readPrusaPaint(read, DEFAULT_COLORS);
   const setPalette = (colors2) => {
     if (colors2.length > 255)
       throw new Error("This palette exceeds the 255 material limit.");
@@ -290,9 +255,10 @@ function readDocumentData(buffer, filename = "Model.3mf", progress = (_message) 
   };
   if (prusa3) {
     warnings.push("Experimental PrusaSlicer 3.x paint import.");
-    if (prusa3.flattenedRecipes)
+    warnings.push(...prusa3.virtualWarnings);
+    if (prusa3.hasVirtualExtruders)
       warnings.push(
-        "Blend and gradient assignments were kept as flat color regions. Their mixing recipes were discarded; assign materials to these region numbers in the slicer."
+        "Virtual extruders were retained as separate color regions. Update export preserves their source recipes; create export needs virtualExtruders to regenerate blend recipes."
       );
     if (prusa3.palettes.length) setPalette(prusa3.palettes[0]);
     if (prusa3.palettes.some(
@@ -997,8 +963,8 @@ var TARGETS = Object.freeze([
     name: "PrusaSlicer 3.x",
     maxPaintRegions: 255,
     experimental: true,
-    supportsVirtualExtruders: false,
-    virtualExtruderNote: "Virtual extruder creation is not yet validated for the PrusaSlicer 3.x JSON project format. Export with the prusa target for PrusaSlicer 2.9.6.",
+    supportsVirtualExtruders: true,
+    virtualExtruderNote: "Requires Open Project in PrusaSlicer 3.0.0-alpha12 and a native source project or prusa3Template with matching physical material slots. The selected template's configuration is copied.",
     note: "Experimental support for PrusaSlicer 3.x projects.",
     cleanNote: "Blend and gradient assignments become flat color regions. Their mixing recipes and printer configuration are discarded."
   }),
@@ -1233,7 +1199,7 @@ function updateFiles(document, source, changes, target, limits = {}) {
     if (document.objects.map((o) => o.id).join("|") !== source.baseline.objects.map((o) => o.id).join("|")) {
       data.config_containers = [];
       warnings.push(
-        "Bed configuration was discarded because the instance layout changed."
+        "Bed configuration and any virtual-extruder recipes were discarded because the instance layout changed."
       );
     }
     files[PROJECT] = strToU8(JSON.stringify(data));
@@ -1409,9 +1375,6 @@ var DEFAULT_V7_PARAMS = {
   HUE_PEAK: 10.38,
   PEAK_STRENGTH: 1.375
 };
-function mixFilaments(parts) {
-  return mixFilamentsWithParams(parts, DEFAULT_V7_PARAMS);
-}
 function mixFilamentsWithParams(parts, params) {
   if (parts.length === 0) {
     throw new Error("mixFilaments: parts must not be empty");
@@ -1510,6 +1473,348 @@ function deltaE2000(lab1, lab2) {
   );
 }
 
+// src/mix.ts
+function normalizeMix(components, toolCount = Number.MAX_SAFE_INTEGER) {
+  if (!Number.isSafeInteger(toolCount) || toolCount < 1)
+    throw new Error("toolCount must be a positive safe integer.");
+  if (!Array.isArray(components) || !components.length)
+    throw new Error(
+      "A mix must contain components with a finite positive sum."
+    );
+  const weights = /* @__PURE__ */ new Map();
+  for (const p of components) {
+    if (!p || !Number.isSafeInteger(p.extruder) || p.extruder < 1 || p.extruder > toolCount || !Number.isFinite(p.ratio) || p.ratio < 0)
+      throw new Error(
+        "Mix components require available tools and finite, nonnegative ratios."
+      );
+    if (p.ratio > 0)
+      weights.set(p.extruder, (weights.get(p.extruder) ?? 0) + p.ratio);
+  }
+  const total = [...weights.values()].reduce((a, b) => a + b, 0);
+  if (!(total > 0) || !Number.isFinite(total))
+    throw new Error("A mix must have a finite positive sum.");
+  return [...weights].sort(([a], [b]) => a - b).map(([extruder, ratio]) => ({ extruder, ratio: ratio / total })).filter((p) => p.ratio > 0);
+}
+function mixUnits(percentageStep) {
+  const units = Math.round(100 / percentageStep);
+  if (!Number.isFinite(percentageStep) || percentageStep <= 0 || percentageStep > 100 || !Number.isSafeInteger(units) || Math.abs(units * percentageStep - 100) > 1e-9)
+    throw new Error(
+      "percentageStep must be positive and divide 100 exactly (for example 5, 1 or 2.5)."
+    );
+  return units;
+}
+function quantizeMix(components, percentageStep = 5) {
+  const units = mixUnits(percentageStep), parts = normalizeMix(components);
+  const exact = parts.map((p) => p.ratio * units), counts = exact.map(Math.floor);
+  const order = exact.map((x, i) => ({ i, remainder: x - counts[i] })).sort((a, b) => b.remainder - a.remainder || a.i - b.i);
+  const remaining = units - counts.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < remaining; i++) counts[order[i].i]++;
+  return parts.flatMap(
+    (p, i) => counts[i] ? [{ extruder: p.extruder, ratio: counts[i] / units }] : []
+  );
+}
+function visitMixGrid(toolCount, maxContributors, units, visit) {
+  const tools = [], counts = [];
+  function composition(remaining, index) {
+    if (index === tools.length - 1) {
+      counts[index] = remaining;
+      visit(
+        tools.map((extruder, i) => ({ extruder, ratio: counts[i] / units }))
+      );
+      return;
+    }
+    for (let n = 1; n <= remaining - (tools.length - index - 1); n++) {
+      counts[index] = n;
+      composition(remaining - n, index + 1);
+    }
+  }
+  function support(next) {
+    if (tools.length) composition(units, 0);
+    if (tools.length >= Math.min(maxContributors, units)) return;
+    for (let id = next; id <= toolCount; id++) {
+      tools.push(id);
+      support(id + 1);
+      tools.pop();
+    }
+  }
+  support(1);
+}
+function optimizeMix(toolCount, objective, options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options))
+    throw new Error("Invalid continuous mix options.");
+  const {
+    maxContributors: k = Math.min(3, toolCount),
+    tolerance = 1e-6,
+    seedPercentageStep = 10,
+    startsPerSupport: starts = 4,
+    maxEvaluations: budget = 1e6
+  } = options;
+  const seedUnits = mixUnits(seedPercentageStep);
+  if (!Number.isSafeInteger(toolCount) || toolCount < 1 || !Number.isSafeInteger(k) || k < 1 || k > toolCount)
+    throw new Error(
+      "maxContributors must be an integer from 1 through toolCount."
+    );
+  if (typeof objective !== "function" || !Number.isFinite(tolerance) || tolerance <= 0 || tolerance >= 1 || !Number.isSafeInteger(starts) || starts < 1 || !Number.isSafeInteger(budget) || budget < 1)
+    throw new Error(
+      "Invalid continuous mix objective, tolerance, startsPerSupport or maxEvaluations."
+    );
+  let evaluations = 0;
+  let best;
+  const score = (components) => {
+    if (++evaluations > budget)
+      throw new Error(
+        "Continuous mix search exceeds maxEvaluations. Increase the budget or reduce toolCount/maxContributors."
+      );
+    const canonical = normalizeMix(components, toolCount);
+    const error = objective(canonical.map((p) => ({ ...p })));
+    if (!Number.isFinite(error))
+      throw new Error("The mix objective must return a finite error.");
+    if (!best || error < best.error) best = { components: canonical, error };
+    return error;
+  };
+  const seeds = /* @__PURE__ */ new Map();
+  visitMixGrid(toolCount, k, Math.max(seedUnits, k), (parts) => {
+    const key = parts.map((p) => p.extruder).join(","), error = score(parts);
+    const ranked = seeds.get(key) ?? [];
+    ranked.push({ parts, error });
+    ranked.sort((a, b) => a.error - b.error);
+    if (ranked.length > starts) ranked.pop();
+    seeds.set(key, ranked);
+  });
+  for (const ranked of seeds.values())
+    for (const seed of ranked) {
+      let parts = seed.parts.map((p) => ({ ...p })), error = seed.error;
+      for (let step = 1 / Math.max(seedUnits, k) / 2; step >= tolerance; ) {
+        let next, nextError = error;
+        for (let i = 0; i < parts.length; i++)
+          for (let j = 0; j < parts.length; j++) {
+            if (i === j || parts[j].ratio < step) continue;
+            const candidate = parts.map((p) => ({ ...p }));
+            candidate[i].ratio += step;
+            candidate[j].ratio -= step;
+            if (candidate[j].ratio < 1e-14) candidate[j].ratio = 0;
+            const e = score(candidate);
+            if (e < nextError - 1e-12) {
+              next = candidate;
+              nextError = e;
+            }
+          }
+        if (next) {
+          parts = next;
+          error = nextError;
+        } else step /= 2;
+      }
+    }
+  return {
+    ...best,
+    components: best.components.map((p) => ({ ...p })),
+    evaluations,
+    guarantee: "approximate"
+  };
+}
+
+// src/color-mix.ts
+var validColor = (color) => typeof color === "string" && /^#[\da-f]{6}$/i.test(color);
+var prusaColorMixPredictor = (parts) => {
+  if (!Array.isArray(parts) || !parts.length || parts.some(
+    (p) => !p || !validColor(p.hex) || !Number.isFinite(p.ratio) || p.ratio < 0
+  ))
+    throw new Error(
+      "Prusa prediction requires #RRGGBB colors and finite, nonnegative ratios."
+    );
+  const active = parts.filter((p) => p.ratio > 0);
+  const total = active.reduce((sum, p) => sum + p.ratio, 0);
+  if (!(total > 0) || !Number.isFinite(total))
+    throw new Error("Prusa prediction requires a finite positive ratio sum.");
+  return mixFilamentsWithParams(
+    active.map((p) => ({ ...p })),
+    {
+      ...DEFAULT_V7_PARAMS,
+      HUE_PEAK: DEFAULT_V7_PARAMS.HUE_PEAK / DEFAULT_V7_PARAMS.PEAK_STRENGTH
+    }
+  ).hex;
+};
+function candidateCount(n, k, units, budget) {
+  let total = 0, supports = 1, compositions = 1;
+  for (let s = 1; s <= Math.min(n, k, units); s++) {
+    supports = supports * (n - s + 1) / s;
+    if (s > 1) compositions = compositions * (units - s + 1) / (s - 1);
+    total += supports * compositions;
+    if (total > budget + 1e-6 || !Number.isFinite(total))
+      throw new Error(
+        "Color mix search exceeds maxCandidates. Increase the budget, use larger percentageStep, or reduce tools/maxContributors."
+      );
+  }
+  return Math.round(total);
+}
+function createColorMixSolver(physicalColors, options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options))
+    throw new Error("Invalid color mix options.");
+  if (!Array.isArray(physicalColors) || !physicalColors.length || physicalColors.some((c) => !validColor(c)))
+    throw new Error("physicalColors must contain one #RRGGBB color per tool.");
+  const colors = physicalColors.map((c) => c.toUpperCase()), n = colors.length;
+  const {
+    maxContributors: k = Math.min(3, n),
+    percentageStep = 5,
+    maxAdditionalDeltaE: allowance = 2,
+    preferNeutral: neutral = true,
+    predictor = prusaColorMixPredictor,
+    maxCandidates: budget = 1e6
+  } = options;
+  const units = mixUnits(percentageStep);
+  if (!Number.isSafeInteger(k) || k < 1 || k > n)
+    throw new Error(
+      "maxContributors must be an integer from 1 through the number of physicalColors."
+    );
+  if (!Number.isFinite(allowance) || allowance < 0 || typeof neutral !== "boolean" || typeof predictor !== "function" || !Number.isSafeInteger(budget) || budget < 1)
+    throw new Error(
+      "Invalid maxAdditionalDeltaE, preferNeutral, predictor or maxCandidates."
+    );
+  const count = candidateCount(n, k, units, budget);
+  const predict = (parts) => {
+    const normalized = normalizeMix(parts, n);
+    const hex = predictor(
+      normalized.map((p) => ({
+        hex: colors[p.extruder - 1],
+        ratio: p.ratio,
+        extruder: p.extruder
+      }))
+    );
+    if (!validColor(hex))
+      throw new Error(
+        "The color mix predictor must return a #RRGGBB display color."
+      );
+    return hex.toUpperCase();
+  };
+  const inputChroma = colors.map((c) => chroma(hexToLab(c)));
+  const candidates = [];
+  visitMixGrid(n, k, units, (components) => {
+    const color = predict(components);
+    candidates.push({
+      components,
+      color,
+      lab: hexToLab(color),
+      chromaticShare: components.reduce(
+        (sum, p) => sum + (inputChroma[p.extruder - 1] > 5 ? p.ratio : 0),
+        0
+      )
+    });
+  });
+  const solved = /* @__PURE__ */ new Map();
+  const clone2 = (result) => ({
+    ...result,
+    components: result.components.map((p) => ({ ...p }))
+  });
+  return {
+    candidateCount: count,
+    predict,
+    solve(desiredColor) {
+      if (!validColor(desiredColor))
+        throw new Error("desiredColor must be a #RRGGBB color.");
+      desiredColor = desiredColor.toUpperCase();
+      const cached = solved.get(desiredColor);
+      if (cached) return clone2(cached);
+      const desired = hexToLab(desiredColor), preferNeutral = neutral && chroma(desired) < 5;
+      const errors = candidates.map((c) => deltaE2000(desired, c.lab));
+      let minimum = Infinity;
+      for (const error of errors) if (error < minimum) minimum = error;
+      let selected = -1;
+      for (let i = 0; i < candidates.length; i++) {
+        if (errors[i] > minimum + allowance + 1e-9) continue;
+        if (selected < 0) {
+          selected = i;
+          continue;
+        }
+        const a = candidates[i], b = candidates[selected];
+        const size = a.components.length - b.components.length;
+        const chromatic = preferNeutral ? a.chromaticShare - b.chromaticShare : 0;
+        if (size < 0 || size === 0 && (chromatic < -1e-9 || Math.abs(chromatic) <= 1e-9 && errors[i] < errors[selected] - 1e-9))
+          selected = i;
+      }
+      const result = {
+        components: candidates[selected].components,
+        predictedColor: candidates[selected].color,
+        colorDifference: errors[selected],
+        bestColorDifference: minimum
+      };
+      if (solved.size >= 256) solved.clear();
+      solved.set(desiredColor, result);
+      return clone2(result);
+    }
+  };
+}
+function solveColorMix(desiredColor, physicalColors, options = {}) {
+  return createColorMixSolver(physicalColors, options).solve(desiredColor);
+}
+
+// src/prusa-mix.ts
+function planPrusaMixSequence(components, layerCount) {
+  if (layerCount !== void 0 && (!Number.isSafeInteger(layerCount) || layerCount < 1))
+    throw new Error("layerCount must be a positive safe integer.");
+  const parts = normalizeMix(components);
+  if (parts.length > 3)
+    throw new Error("Prusa layer mixes support at most three contributors.");
+  let counts = [1];
+  if (parts.length > 1) {
+    for (let length = 2; length <= 64; length++) {
+      counts = parts.map((p) => Math.max(1, Math.round(p.ratio * length)));
+      const total2 = counts.reduce((a, b) => a + b, 0);
+      if (parts.every((p, i) => Math.abs(counts[i] / total2 - p.ratio) <= 0.03))
+        break;
+    }
+    const gcd = (a, b) => b ? gcd(b, a % b) : a;
+    const divisor = counts.reduce(gcd);
+    counts = counts.map((c) => c / divisor);
+  }
+  const total = counts.reduce((a, b) => a + b, 0), emitted = parts.map(() => 0), cycle = [];
+  for (let slot = 0; slot < total; slot++) {
+    let best = 0, deficit = -Infinity;
+    for (let i = 0; i < parts.length; i++) {
+      const d = (slot + 1) * counts[i] / total - emitted[i];
+      if (d > deficit) {
+        best = i;
+        deficit = d;
+      }
+    }
+    emitted[best]++;
+    cycle.push(parts[best].extruder);
+  }
+  let run = 1, longest = 1, maxGap = 1;
+  for (let i = 1; i < total * 2; i++) {
+    run = cycle[i % total] === cycle[(i - 1) % total] ? run + 1 : 1;
+    longest = Math.max(longest, run);
+  }
+  for (const p of parts) {
+    const positions = cycle.flatMap((id, i) => id === p.extruder ? [i] : []);
+    for (let i = 0; i < positions.length; i++)
+      maxGap = Math.max(
+        maxGap,
+        (i + 1 < positions.length ? positions[i + 1] : positions[0] + total) - positions[i]
+      );
+  }
+  const actual = parts.map((p, i) => ({
+    extruder: p.extruder,
+    ratio: counts[i] / total
+  }));
+  const result = {
+    cycle,
+    components: actual,
+    maxRatioError: Math.max(
+      ...actual.map((p, i) => Math.abs(p.ratio - parts[i].ratio))
+    ),
+    maxRunLayers: parts.length === 1 ? null : longest,
+    maxContributorGapLayers: maxGap
+  };
+  if (layerCount !== void 0) {
+    const periods = Math.floor(layerCount / total), tail = layerCount % total;
+    result.printedComponents = parts.map((p, i) => ({
+      extruder: p.extruder,
+      ratio: (periods * counts[i] + cycle.slice(0, tail).filter((id) => id === p.extruder).length) / layerCount
+    }));
+  }
+  return result;
+}
+
 // src/virtual-extruders.ts
 var VIRTUAL_EXTRUDER_PALETTE = Object.freeze([
   Object.freeze({ name: "Cyan", color: "#00FFFF" }),
@@ -1521,7 +1826,7 @@ var VIRTUAL_EXTRUDER_PALETTE = Object.freeze([
   Object.freeze({ name: "Green", color: "#00FF00" }),
   Object.freeze({ name: "Blue", color: "#0000FF" })
 ]);
-var validColor = (color) => typeof color === "string" && /^#[\da-f]{6}$/i.test(color);
+var validColor2 = (color) => typeof color === "string" && /^#[\da-f]{6}$/i.test(color);
 var copyComponents = (parts) => parts.map((p) => ({ ...p }));
 function recipe(parts, count) {
   if (!Array.isArray(parts) || parts.length < 1 || parts.length > 3 || parts.some(
@@ -1552,12 +1857,17 @@ function planVirtualExtruders(document, options, limits = {}) {
       "Virtual extruder export requires physicalExtruderCount from 2 through 8. A single physical tool cannot mix colors."
     );
   const count = options.physicalExtruderCount;
+  const maxContributors = options.maxContributors === void 0 ? Math.min(3, count) : options.maxContributors;
+  if (!Number.isInteger(maxContributors) || maxContributors < 1 || maxContributors > Math.min(3, count))
+    throw new Error(
+      "Virtual maxContributors must be from 1 through 3 and not exceed the physical tool count."
+    );
   const colors = options.physicalColors === void 0 ? VIRTUAL_EXTRUDER_PALETTE.slice(0, count).map((p) => p.color) : options.physicalColors;
-  if (!Array.isArray(colors) || colors.length !== count || colors.some((c) => !validColor(c)))
+  if (!Array.isArray(colors) || colors.length !== count || colors.some((c) => !validColor2(c)))
     throw new Error(
       "physicalColors must contain one #RRGGBB color per physical extruder."
     );
-  if (!Array.isArray(document.palette) || document.palette.length > 255 || document.palette.some((c) => !validColor(c)))
+  if (!Array.isArray(document.palette) || document.palette.length > 255 || document.palette.some((c) => !validColor2(c)))
     throw new Error("Invalid region display palette.");
   const regions = /* @__PURE__ */ new Set();
   const add = (region) => {
@@ -1597,6 +1907,8 @@ function planVirtualExtruders(document, options, limits = {}) {
           "Recipe overrides must reference distinct used source regions."
         );
       overrides.set(item.region, recipe(item.components, count));
+      if (normalizeMix(overrides.get(item.region), count).length > maxContributors)
+        throw new Error("Recipe overrides must not exceed maxContributors.");
     }
   }
   const physicalExtruders = colors.map((color, i) => ({
@@ -1604,34 +1916,9 @@ function planVirtualExtruders(document, options, limits = {}) {
     name: options.physicalColors ? `Tool ${i + 1}` : VIRTUAL_EXTRUDER_PALETTE[i].name,
     color: color.toUpperCase()
   }));
-  const predict = (components) => mixFilaments(
-    components.map((p) => ({
-      hex: colors[p.extruder - 1],
-      ratio: p.ratio
-    }))
-  );
-  const candidates = [];
-  const candidate = (parts) => {
-    const prediction = predict(parts);
-    candidates.push({ components: recipe(parts, count), prediction });
-  };
-  for (let i = 1; i <= count; i++) candidate([{ extruder: i, ratio: 1 }]);
-  for (let i = 1; i <= count; i++)
-    for (let j = i + 1; j <= count; j++) {
-      for (const ratio of [0.25, 0.5, 0.75])
-        candidate([
-          { extruder: i, ratio },
-          { extruder: j, ratio: 1 - ratio }
-        ]);
-      for (let k = j + 1; k <= count; k++)
-        candidate([
-          { extruder: i, ratio: 1 / 3 },
-          { extruder: j, ratio: 1 / 3 },
-          { extruder: k, ratio: 1 / 3 }
-        ]);
-    }
+  const solver = createColorMixSolver(colors, { ...options, maxContributors });
   const warnings = [
-    "Open this ColorMix 3MF with File \u2192 Open Project in PrusaSlicer 2.9.6 or later. Importing geometry alone discards virtual extruders.",
+    "Open this ColorMix 3MF with File \u2192 Open Project in the destination PrusaSlicer version. Importing geometry alone discards virtual extruders.",
     `Recipes reference ${count} physical tools. Select a printer with those slots before opening the project and load the intended filaments in the same order; display swatches do not automatically recalculate recipes.`
   ];
   if (!options.physicalColors)
@@ -1643,30 +1930,34 @@ function planVirtualExtruders(document, options, limits = {}) {
     regions: [...regions].sort((a, b) => a - b).map((region, i) => {
       const color = (document.palette[region - 1] ?? DEFAULT_COLORS[(region - 1) % DEFAULT_COLORS.length]).toUpperCase();
       const desired = hexToLab(color);
-      let selected = candidates[0], difference = Infinity;
       const explicit = overrides.get(region);
-      const choices = explicit ? [
-        {
-          components: explicit,
-          prediction: predict(
-            explicit.length === 2 && explicit[0].extruder === explicit[1].extruder ? [{ extruder: explicit[0].extruder, ratio: 1 }] : explicit
-          )
-        }
-      ] : candidates;
-      for (const item of choices) {
-        const distance = deltaE2000(desired, item.prediction.lab);
-        if (distance < difference - 1e-9) {
-          selected = item;
-          difference = distance;
-        }
+      let selected = explicit ? void 0 : solver.solve(color);
+      if (explicit) {
+        const components = normalizeMix(explicit, count), predictedColor = solver.predict(components);
+        const difference = deltaE2000(desired, hexToLab(predictedColor));
+        selected = {
+          components,
+          predictedColor,
+          colorDifference: difference,
+          bestColorDifference: difference
+        };
       }
+      const layerMix = planPrusaMixSequence(selected.components);
+      const scheduledColor = solver.predict(layerMix.components);
       return {
         region,
         virtualExtruder: count + i + 1,
         color,
-        predictedColor: selected.prediction.hex.toUpperCase(),
-        components: copyComponents(selected.components),
-        colorDifference: difference
+        predictedColor: selected.predictedColor,
+        components: copyComponents(recipe(selected.components, count)),
+        colorDifference: selected.colorDifference,
+        bestColorDifference: selected.bestColorDifference,
+        layerMix,
+        scheduledColor,
+        scheduledColorDifference: deltaE2000(
+          desired,
+          hexToLab(scheduledColor)
+        )
       };
     }),
     warnings
@@ -1685,7 +1976,7 @@ function virtualizeDocument(document, plan) {
     ...document,
     palette: [
       ...plan.physicalExtruders.map((p) => p.color),
-      ...plan.regions.map((p) => p.color)
+      ...plan.regions.map((p) => p.predictedColor)
     ],
     objects: document.objects.map((object) => ({
       ...object,
@@ -1698,7 +1989,20 @@ function virtualizeDocument(document, plan) {
     }))
   };
 }
-function attachVirtualExtruders(files, plan) {
+function attachVirtualExtruders(files, plan, prusa3Container) {
+  const virtual_extruders = plan.regions.map((r) => ({
+    id: r.virtualExtruder,
+    kind: "fullspectrum",
+    color: r.predictedColor,
+    components: r.components
+  }));
+  if (prusa3Container) {
+    const path = "Metadata/PrusaSlicer3_project.json";
+    const data = JSON.parse(strFromU8(files[path]));
+    data.config_containers = [{ ...prusa3Container, virtual_extruders }];
+    files[path] = strToU8(JSON.stringify(data));
+    return;
+  }
   files[FULL_SPECTRUM_PATH] = strToU8(
     JSON.stringify({
       version: 1,
@@ -1706,14 +2010,49 @@ function attachVirtualExtruders(files, plan) {
         id,
         color
       })),
-      virtual_extruders: plan.regions.map((r) => ({
-        id: r.virtualExtruder,
-        kind: "fullspectrum",
-        color: r.color,
-        components: r.components
-      }))
+      virtual_extruders
     })
   );
+}
+function prusa3VirtualContainer(bytes, plan, index = 0, limits = {}) {
+  if (!Number.isSafeInteger(index) || index < 0)
+    throw new Error("prusa3ConfigContainer must be a nonnegative integer.");
+  const archive = new Archive(bytes, limits);
+  const path = archive.pathFor("Metadata/PrusaSlicer3_project.json");
+  const data = path ? JSON.parse(strFromU8(archive.read(path))) : {};
+  const container = data.config_containers?.[index];
+  const hw = container?.preset?.hw_config;
+  const config = container?.configuration;
+  const record = (v) => v && typeof v === "object" && !Array.isArray(v);
+  if (!hw || hw.technology !== "fff" || !hw.config_id || !Number.isSafeInteger(hw.tool_count) || hw.tool_count < 1 || !record(hw.tools) || !Array.isArray(container.preset.materials) || ![
+    "printer_settings",
+    "print_settings",
+    "filament_settings",
+    "project_settings",
+    "toolprint_settings"
+  ].every((key) => record(config?.[key])))
+    throw new Error(
+      "PrusaSlicer 3.x virtual export requires a native FFF configuration container in prusa3Template (or the source document)."
+    );
+  let count = hw.tool_count;
+  for (const [key, value] of Object.entries(hw.tools)) {
+    if (!/^\d+$/.test(key)) continue;
+    const slots = value?.feeder?.slot_count;
+    if (slots === void 0) continue;
+    if (!Number.isSafeInteger(slots) || slots < 1)
+      throw new Error("The Prusa 3 template has an invalid feeder slot count.");
+    count += slots - 1;
+  }
+  if (count !== plan.physicalExtruders.length || container.preset.materials.length !== count)
+    throw new Error(
+      "physicalExtruderCount must match the Prusa 3 template's physical material slots."
+    );
+  const copied = structuredClone({
+    preset: container.preset,
+    configuration: config
+  });
+  copied.configuration.project_settings.extruder_colour = plan.physicalExtruders.map((p) => p.color);
+  return { ...copied, beds: [{ position_x: 0, position_y: 0 }] };
 }
 
 // src/document.ts
@@ -1932,7 +2271,7 @@ function writeDocument(document, options) {
   if (options.virtualExtruders !== void 0) {
     if (!getTarget(target).supportsVirtualExtruders)
       throw new Error(
-        `Virtual extruder export is not supported for ${getTarget(target).name}. Choose the dedicated PrusaSlicer 2.x target (prusa), requiring PrusaSlicer 2.9.6 or later.`
+        `Virtual extruder export is not supported for ${getTarget(target).name}. Choose prusa (PrusaSlicer 2.9.6 or later) or prusa3 (a native PrusaSlicer 3.x template is required).`
       );
     if (options.mode !== "create")
       throw new Error(
@@ -1945,14 +2284,34 @@ function writeDocument(document, options) {
       limits
     );
     const mapped = virtualizeDocument(document, plan);
-    const files = createFiles(mapped, "prusa", limits, {
+    let container;
+    if (target === "prusa3") {
+      const template = options.virtualExtruders.prusa3Template ?? document;
+      const source = sources.get(template);
+      if (!source || template.format !== "prusa3")
+        throw new Error(
+          "PrusaSlicer 3.x virtual export requires a source-backed native prusa3Template (or a native source document). Read a printer project with readDocument first."
+        );
+      container = prusa3VirtualContainer(
+        source.bytes,
+        plan,
+        options.virtualExtruders.prusa3ConfigContainer,
+        limits
+      );
+    }
+    const files = createFiles(mapped, target, limits, {
       application: "PrusaSlicer-2.9.6"
     });
-    attachVirtualExtruders(files, plan);
+    attachVirtualExtruders(files, plan, container);
     return {
       bytes: zipSync(files, { level: 6 }),
       changes: compareDocument(document),
-      warnings: [...plan.warnings],
+      warnings: [
+        ...plan.warnings,
+        ...container ? [
+          "PrusaSlicer 3.x virtual export copies the selected template's printer, print and filament configuration into a single bed. Model placement is retained; review bed placement and those settings before printing."
+        ] : []
+      ],
       droppedPaths: [],
       virtualExtruders: plan
     };
@@ -2160,6 +2519,13 @@ export {
   paintTargets,
   noticesForMode,
   SLICER_NAMES,
+  normalizeMix,
+  quantizeMix,
+  optimizeMix,
+  prusaColorMixPredictor,
+  createColorMixSolver,
+  solveColorMix,
+  planPrusaMixSequence,
   VIRTUAL_EXTRUDER_PALETTE,
   planVirtualExtruders,
   identity,

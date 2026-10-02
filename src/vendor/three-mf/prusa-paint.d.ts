@@ -1,6 +1,7 @@
-export function readPrusaPaint(read: any): {
+export function readPrusaPaint(read: any, fallbackColors?: string[]): {
     objects: Map<any, any>;
     instances: Map<any, any>;
     palettes: any[][];
-    flattenedRecipes: boolean;
+    hasVirtualExtruders: boolean;
+    virtualWarnings: string[];
 };

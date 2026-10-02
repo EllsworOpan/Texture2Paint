@@ -5,32 +5,39 @@ import {
   TARGETS,
   VIRTUAL_EXTRUDER_PALETTE,
   compareDocument,
+  createColorMixSolver,
   createDocument,
   editDocument,
   exportProject,
   getTarget,
   identity,
   importProject,
+  normalizeMix,
   noticesForMode,
+  optimizeMix,
   originalBytes,
   outputTarget,
   paintTargets,
+  planPrusaMixSequence,
   planVirtualExtruders,
   preferredPaintTarget,
+  prusaColorMixPredictor,
+  quantizeMix,
   readDocument,
   replacePart,
   resolvePart,
+  solveColorMix,
   sourceContext,
   validateDocument,
   worldParts,
   writeDocument
-} from "./chunk-N2OW6ED6.js";
+} from "./chunk-I6I3N24Z.js";
 import "./chunk-JKOOODL2.js";
 import "./chunk-563TAMUL.js";
 import "./chunk-J7ABM23C.js";
 import "./chunk-UNJW77SA.js";
 import "./chunk-W7EBKI6N.js";
-import "./chunk-DHSJONSU.js";
+import "./chunk-WQ5OOP4H.js";
 import "./chunk-2SPQVFJA.js";
 import {
   DEFAULT_LIMITS,
@@ -244,22 +251,29 @@ export {
   VIRTUAL_EXTRUDER_PALETTE,
   appendParts,
   compareDocument,
+  createColorMixSolver,
   createDocument,
   editDocument,
   fromGeometryView,
   geometryView,
   getTarget,
   identity,
+  normalizeMix,
   noticesForMode,
+  optimizeMix,
   originalBytes,
   outputTarget,
   paintTargets,
+  planPrusaMixSequence,
   planVirtualExtruders,
   preferredPaintTarget,
+  prusaColorMixPredictor,
+  quantizeMix,
   readDocument,
   replacePart,
   resolvePaint,
   resolvePart,
+  solveColorMix,
   validateDocument,
   worldParts,
   writeDocument
