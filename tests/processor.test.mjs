@@ -1164,8 +1164,8 @@ test('virtual 3MF export writes physical colors, recipes, and matching virtual p
   assert.equal(metadata.version, 1);
   assert.deepEqual(metadata.physical_extruders, physicalColors.map((color, index) => ({ id: index + 1, color })));
   assert.deepEqual(metadata.virtual_extruders.map(({ id, kind, color }) => ({ id, kind, color })), [
-    { id: 3, kind: 'fullspectrum', color: '#000000' },
-    { id: 4, kind: 'fullspectrum', color: '#FFFFFF' },
+    { id: 3, kind: 'fullspectrum', color: '#20252B' },
+    { id: 4, kind: 'fullspectrum', color: '#989089' },
   ]);
   assert.deepEqual(metadata.virtual_extruders[1].components, [
     { extruder: 1, ratio: 0.25 }, { extruder: 2, ratio: 0.75 },
@@ -1179,7 +1179,7 @@ test('virtual 3MF export writes physical colors, recipes, and matching virtual p
   const originalPart = readDocument(ordinary).objects[0].parts[0];
   assert.deepEqual(part.mesh, originalPart.mesh);
   assert.deepEqual(part.paint, originalPart.paint.map(({ region }) => ({ region: region + 2 })));
-  assert.deepEqual(document.palette, [...physicalColors, '#000000', '#FFFFFF']);
+  assert.deepEqual(document.palette, [...physicalColors, '#20252B', '#989089']);
   assert.doesNotMatch(Object.values(files).map(strFromU8).join('\n'), /nozzle_diameter|printer_settings|filament_diameter|print_settings/);
   assert.equal(unzipSync(ordinary)['Metadata/Prusa_Slicer_full_spectrum.json'], undefined);
   assert.deepEqual(root._quantizedPalette, [[0, 0, 0], [255, 255, 255]]);
@@ -1202,7 +1202,10 @@ test('virtual 3MF export defaults to Prusa and supports 2 through 8 physical slo
 
 test('virtual 3MF export rejects unsupported slicers and invalid physical slots or colors', async () => {
   const root = createQuantizedSquareRoot(new Uint8Array([0]), 1, 1);
-  for (const format of ['universal', 'prusa2-bambu', 'prusa3', 'bambu', 'orca']) {
+  await assert.rejects(() => exportedModelXml(root, 0, 10, {
+    format: 'prusa3', virtualExtruders: { physicalExtruderCount: 5 },
+  }), /source-backed native prusa3Template/);
+  for (const format of ['universal', 'prusa2-bambu', 'bambu', 'orca']) {
     await assert.rejects(() => exportedModelXml(root, 0, 10, {
       format, virtualExtruders: { physicalExtruderCount: 5 },
     }), /Virtual extruder export is not supported/);
