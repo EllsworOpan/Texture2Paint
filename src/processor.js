@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { createDocument, writeDocument, identity, getTarget } from './vendor/three-mf/index.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { clone as cloneWithSkeletons } from 'three/addons/utils/SkeletonUtils.js';
 
 /**
  * Converts any attribute to Float32BufferAttribute.
@@ -327,7 +328,8 @@ export function canonicalizeModel(rootObject, { mergeMeshes = false } = {}) {
  */
 export function cloneModelForProcessing(rootObject) {
   if (!rootObject) return null;
-  const clone = rootObject.clone(true);
+  const clone = cloneWithSkeletons(rootObject);
+  clone.updateMatrixWorld(true);
   const textureClones = new Map();
   const cloneTexture = texture => {
     if (!texture) return texture;
@@ -5466,7 +5468,8 @@ export function exportProcessedGlb(model, {
       'iridescenceThicknessMap', 'sheenColorMap', 'sheenRoughnessMap',
       'specularColorMap', 'specularIntensityMap', 'thicknessMap', 'transmissionMap',
     ];
-    const exportScene = model.clone(true);
+    const exportScene = cloneWithSkeletons(model);
+    exportScene.updateMatrixWorld(true);
     const textureClones = new Map();
     exportScene.traverse(child => {
       if (child.isMesh) {

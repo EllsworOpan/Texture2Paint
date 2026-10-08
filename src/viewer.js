@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { clone as cloneWithSkeletons } from 'three/addons/utils/SkeletonUtils.js';
 import { applyUvFlip, getModelTextures, sampleAuthoredSurfaceColor } from './processor.js';
 
 const MATTE_MATERIAL_OVERRIDES = {
@@ -150,11 +151,13 @@ export class Viewer {
   };
 
   _frame(obj) {
+    obj.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(obj);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     obj.position.sub(center);
+    obj.updateMatrixWorld(true);
     const dist = maxDim * (this.camera.aspect < 1 ? 2.6 : 1.8);
     this.camera.position.set(dist, dist * 0.7, dist);
     this.camera.near = maxDim / 100;
@@ -345,7 +348,8 @@ export class Viewer {
   /** Creates an export copy without display-only matte overrides. */
   createExportObject({ restoreMaterialEffects = true } = {}) {
     if (!this.currentModel) return null;
-    const clone = this.currentModel.clone(true);
+    const clone = cloneWithSkeletons(this.currentModel);
+    clone.updateMatrixWorld(true);
     const sourceMeshes = [];
     const clonedMeshes = [];
     this.currentModel.traverse(object => { if (object.isMesh) sourceMeshes.push(object); });

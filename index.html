@@ -2112,6 +2112,7 @@
     import { USDZExporter } from 'three/addons/exporters/USDZExporter.js';
     import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
     import { unzipSync } from 'fflate';
+    import { createResourceManager, prepareColladaText } from './src/model-import.js';
 
     const $ = id => document.getElementById(id);
     const $toast = $('toast');
@@ -2554,63 +2555,6 @@
       for (const url of new Set(urls)) URL.revokeObjectURL(url);
     }
 
-    function createResourceManager(files) {
-      const manager = new THREE.LoadingManager();
-      const urls = [];
-      const byName = new Map();
-      const byNameLower = new Map();
-
-      for (const file of files) {
-        const url = URL.createObjectURL(file);
-        urls.push(url);
-
-        const cleanName = (file.name || '').replace(/\\/g, '/');
-        const baseName = cleanName.split('/').pop() || '';
-        const relPath = (file.relativePath ? file.relativePath : cleanName).replace(/\\/g, '/');
-        const relBase = relPath.split('/').pop() || '';
-
-        const aliases = [
-          cleanName,
-          `./${cleanName}`,
-          baseName,
-          `./${baseName}`,
-          `textures/${baseName}`,
-          `./textures/${baseName}`,
-          relPath,
-          `./${relPath}`,
-          relBase,
-          `./${relBase}`,
-          `textures/${relBase}`,
-          `./textures/${relBase}`
-        ];
-
-        for (const alias of aliases) {
-          if (!alias) continue;
-          byName.set(alias, url);
-          byNameLower.set(alias.toLowerCase(), url);
-        }
-      }
-
-      manager.setURLModifier(url => {
-        const clean = decodeURIComponent(url.split(/[?#]/)[0]).replace(/\\/g, '/');
-        const cleanWithoutDot = clean.replace(/^\.\//u, '');
-        const base = clean.split('/').pop();
-        const baseWithoutDot = base ? base.replace(/^\.\//u, '') : '';
-
-        return byName.get(clean) ||
-          byName.get(cleanWithoutDot) ||
-          byName.get(base) ||
-          byName.get(baseWithoutDot) ||
-          byNameLower.get(clean.toLowerCase()) ||
-          byNameLower.get(cleanWithoutDot.toLowerCase()) ||
-          byNameLower.get(base ? base.toLowerCase() : '') ||
-          byNameLower.get(baseWithoutDot ? baseWithoutDot.toLowerCase() : '') ||
-          url;
-      });
-
-      return { manager, urls };
-    }
-
     function parseGltfData(data, manager) {
       return new Promise((resolve, reject) => {
         const loader = new GLTFLoader(manager);
@@ -2742,8 +2686,11 @@
 
       if (ext === 'dae') {
         const text = new TextDecoder().decode(buffer);
+        const scene = new ColladaLoader(manager).parse(prepareColladaText(text), '').scene;
+        // Initialize skinning after Collada's unit scale and up-axis transform.
+        scene.updateMatrixWorld(true);
         return {
-          object: assertHasMesh(new ColladaLoader(manager).parse(text, '').scene),
+          object: assertHasMesh(scene),
           sourceFormat: ext,
           sizeBytes: buffer.byteLength,
         };
@@ -2784,31 +2731,6 @@
     `;
         $textureList.appendChild(item);
       }
-    }
-
-    async function waitForModelTextures(rootObject, timeoutMs = 5000) {
-      const pending = [];
-      rootObject?.traverse(child => {
-        if (!child.isMesh || !child.material) return;
-        const materials = Array.isArray(child.material) ? child.material : [child.material];
-        for (const material of materials) {
-          for (const texture of [material?.map, material?.alphaMap]) {
-            const image = texture?.image;
-            if (!image || image.width > 0 || image.complete) continue;
-            if (typeof image.addEventListener !== 'function') continue;
-            pending.push(new Promise(resolve => {
-              const done = () => resolve();
-              image.addEventListener('load', done, { once: true });
-              image.addEventListener('error', done, { once: true });
-            }));
-          }
-        }
-      });
-      if (!pending.length) return;
-      await Promise.race([
-        Promise.allSettled(pending),
-        new Promise(resolve => setTimeout(resolve, timeoutMs)),
-      ]);
     }
 
     function selectedDecalMappings() {
@@ -3114,8 +3036,8 @@
         }
         const loaded = await loadObjectFromFile(primary, resources.manager, files);
 
+        await resources.waitForLoad();
         canonicalizeModel(loaded.object);
-        await waitForModelTextures(loaded.object);
         const colorSources = analyzeModelColorSources(loaded.object);
         if (!colorSources.hasAuthoredColor) {
           throw new Error('This model has no authored texture, vertex color, or material color to convert.');

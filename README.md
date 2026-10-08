@@ -78,9 +78,11 @@ Prusa and Bambu share paint codes only through slot 16. Higher slots are seriali
 | **PLY** | ✅ | ✅ | Vertex-colored PLY is supported on import |
 | **USDZ** | ❌ | ✅ | Apple AR / iOS QuickLook format |
 | **FBX** | ✅ | ❌ | Autodesk FBX import |
-| **DAE** | ✅ | ❌ | Collada format import |
+| **DAE** | ✅ | ❌ | Collada with external textures; handles duplicate scene-node IDs and malformed affine inverse bind matrices in Assimp exports |
 
 ---
+
+For models with external textures (including `.dae`, `.obj`, and `.gltf`), import a ZIP containing the model and its associated files, or select/drop the model and textures together. A `.dae` file alone does not contain its PNG/JPEG textures. Imports wait for the referenced files to finish loading and report missing resources.
 
 ## Quick Start (Local Setup)
 
@@ -101,6 +103,12 @@ Open `http://localhost:8765` in your browser.
 docker compose up --build
 ```
 Open `http://localhost:8080` in your browser.
+
+---
+
+## Development Checks
+
+Run `npm install` and `npm test` for the Node regression suite. With the repository served locally, open `http://localhost:8765/tests/model-import.browser.html` for the Collada XML and skinning regressions that use browser APIs.
 
 ---
 
