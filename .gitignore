@@ -5,3 +5,5 @@ node_modules/
 tests/fixtures/
 examples
 .tmp
+.local/
+.tmp/
