@@ -1818,7 +1818,7 @@
                 style="padding: 2px 8px; font-size: 10px; height: 20px;">Resample</button>
             </div>
             <div class="proc-slider-row">
-              <input type="range" id="proc-colors-slider" min="2" max="24" step="1" value="5">
+              <input type="range" id="proc-colors-slider" min="2" max="32" step="1" value="5">
               <input type="number" id="proc-colors-num" min="2" max="32" step="1" value="5" class="proc-num-input">
             </div>
 
@@ -3512,7 +3512,7 @@
       let val = parseInt(e.target.value, 10);
       if (isNaN(val) || val < 2) val = 2;
       if (val > 32) val = 32;
-      $colorsSlider.value = Math.min(val, 24);
+      $colorsSlider.value = val;
       updateQuantization(false); // false keeps your existing picks!
     });
 
