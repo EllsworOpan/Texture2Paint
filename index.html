@@ -1910,6 +1910,11 @@
               <div id="proc-physical-colors" class="physical-color-list" role="group" aria-label="Physical filament colors in slot order"></div>
             </div>
             <p class="paint-budget-message" id="proc-virtual-note">PrusaSlicer 2.9.6+ · File → Open Project</p>
+            <div id="proc-prusa3-template-row" hidden style="margin-top: 6px;">
+              <label for="proc-prusa3-template" class="proc-tag">PrusaSlicer 3 printer template (.3mf)</label>
+              <input type="file" id="proc-prusa3-template" accept=".3mf" aria-describedby="proc-prusa3-template-status">
+              <p class="paint-budget-message" id="proc-prusa3-template-status">Required for PrusaSlicer 3.x: save a project from PrusaSlicer 3 with your multi-material printer selected, then load it here.</p>
+            </div>
           </div>
           <div class="proc-label-row" style="margin-top: 4px;">
             <label for="proc-size-num" class="proc-tag">Target Print Size</label>
@@ -2076,7 +2081,7 @@
 
   <script type="module">
     import * as THREE from 'three';
-    import { paintTargets, VIRTUAL_EXTRUDER_PALETTE } from './src/vendor/three-mf/index.js';
+    import { paintTargets, readDocument, VIRTUAL_EXTRUDER_PALETTE } from './src/vendor/three-mf/index.js';
     import { meshyToGlb, isMeshyFile, isGlbFile } from './src/decrypt.js';
     import { decompressGlb } from './src/decompress.js';
     import { Viewer, disposeModelResources } from './src/viewer.js';
@@ -2111,7 +2116,7 @@
     import { PLYExporter } from 'three/addons/exporters/PLYExporter.js';
     import { USDZExporter } from 'three/addons/exporters/USDZExporter.js';
     import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
-    import { unzipSync } from 'fflate';
+    import { unzipSync, strFromU8 } from 'fflate';
     import { createResourceManager, prepareColladaText } from './src/model-import.js';
 
     const $ = id => document.getElementById(id);
@@ -2155,6 +2160,9 @@
     const $virtualSettings = $('proc-virtual-settings');
     const $physicalExtruders = $('proc-physical-extruders');
     const $physicalColors = $('proc-physical-colors');
+    const $prusa3TemplateRow = $('proc-prusa3-template-row');
+    const $prusa3TemplateInput = $('proc-prusa3-template');
+    const $prusa3TemplateStatus = $('proc-prusa3-template-status');
     const $paintModeBadge = $('paint-mode-badge');
     const $paintBudgetStatus = $('paint-budget-status');
     const $paintBudgetSource = $('paint-budget-source');
@@ -2388,6 +2396,54 @@
       }));
     }
 
+    // PrusaSlicer 3.x virtual extruders need a printer configuration copied from
+    // a project that PrusaSlicer 3 saved itself (the library's prusa3Template).
+    let prusa3Template = null;
+
+    // Mirrors the library's slot count: one slot per tool, plus extra feeder
+    // slots (e.g. an MMU) on a tool.
+    function countPrusa3TemplateSlots(bytes) {
+      const files = unzipSync(bytes);
+      const path = Object.keys(files).find(name => name.toLowerCase() === 'metadata/prusaslicer3_project.json');
+      if (!path) throw new Error('This file was not saved by PrusaSlicer 3 (no PrusaSlicer3_project.json).');
+      const container = JSON.parse(strFromU8(files[path])).config_containers?.[0];
+      const hw = container?.preset?.hw_config;
+      if (!hw || hw.technology !== 'fff' || !Number.isSafeInteger(hw.tool_count)) {
+        throw new Error('This project has no FFF printer configuration. Select your printer in PrusaSlicer 3 before saving.');
+      }
+      let count = hw.tool_count;
+      for (const [key, tool] of Object.entries(hw.tools || {})) {
+        if (/^\d+$/.test(key) && Number.isSafeInteger(tool?.feeder?.slot_count)) count += tool.feeder.slot_count - 1;
+      }
+      return { count, printer: container.preset?.name || hw.config_id || 'printer' };
+    }
+
+    function syncPrusa3TemplateUI() {
+      $prusa3TemplateRow.hidden = !($virtualExtrudersToggle.checked && $threeMfTarget.value === 'prusa3');
+    }
+
+    $prusa3TemplateInput.addEventListener('change', async () => {
+      const file = $prusa3TemplateInput.files?.[0];
+      prusa3Template = null;
+      if (!file) return;
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const { count, printer } = countPrusa3TemplateSlots(bytes);
+        const template = readDocument(bytes, file.name);
+        if (template.format !== 'prusa3') throw new Error('This file was not saved by PrusaSlicer 3.');
+        if (count < 2 || count > 8) throw new Error(`The template has ${count} material slot(s); virtual extruders need 2–8.`);
+        prusa3Template = template;
+        $physicalExtruders.value = String(count);
+        renderPhysicalFilamentColors();
+        $prusa3TemplateStatus.textContent = `Loaded ${file.name} · ${printer} · ${count} slots`;
+        toast(`PrusaSlicer 3 template loaded: ${count} physical slots.`, 'ok', 4000);
+      } catch (error) {
+        $prusa3TemplateInput.value = '';
+        $prusa3TemplateStatus.textContent = `Could not use template: ${error.message}`;
+        toast(`Could not use template: ${error.message}`, 'err', 6000);
+      }
+    });
+
     function syncVirtualExtruderUI() {
       const enabled = $virtualExtrudersToggle.checked;
       const targets = paintTargets({ virtualExtruders: enabled });
@@ -2397,10 +2453,12 @@
       $virtualSettings.hidden = !enabled;
       $physicalExtruders.disabled = !enabled;
       renderPhysicalFilamentColors();
+      syncPrusa3TemplateUI();
     }
 
     $threeMfTarget.addEventListener('change', () => {
       if (!$virtualExtrudersToggle.checked) physicalPaintTarget = $threeMfTarget.value;
+      syncPrusa3TemplateUI();
     });
     $virtualExtrudersToggle.addEventListener('change', syncVirtualExtruderUI);
     $physicalExtruders.addEventListener('input', () => {
@@ -3197,6 +3255,7 @@
             virtualExtruders: $virtualExtrudersToggle.checked ? {
               physicalExtruderCount: getPhysicalExtruderCount(),
               physicalColors: physicalFilamentColors.slice(0, getPhysicalExtruderCount()),
+              ...($threeMfTarget.value === 'prusa3' && prusa3Template ? { prusa3Template } : {}),
             } : undefined,
             refineBoundaries: $refineBoundariesToggle.checked,
             overrideBudget: paintModePreference === 'override',
